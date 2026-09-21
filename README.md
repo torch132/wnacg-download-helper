@@ -51,3 +51,10 @@ node --input-type=module --check < storage.js
 node --input-type=module --check < background.js
 node --input-type=module --check < content-script.js
 ```
+
+## 维护与发布约定
+
+- 每次功能或修复更新都要同步递增 `manifest.json` 的版本号，并在发布前运行 `node --test`、JavaScript 语法检查、Manifest 文件引用检查和 `git diff --check`；测试未通过时不提交、不发布。
+- 验证通过后，在 `main` 分支创建清晰的 Git commit，并 push 到 GitHub；不要只修改本地文件而遗漏远端同步。
+- 代码注释、界面文案和错误提示优先使用简体中文；API、Chrome、Manifest、ZIP、MIME 等专业名词保留英文或标准缩写。
+- 发布前检查 staged files，避免提交本机路径、凭据、下载产物和临时文件。
