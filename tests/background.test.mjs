@@ -67,7 +67,7 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
           state: "in_progress",
           url: options.url,
           finalUrl: options.url,
-          filename: `/Users/liulu/Downloads/server-name-${id}.zip`,
+          filename: `/Users/tester/Downloads/server-name-${id}.zip`,
           mime: "application/zip",
           fileSize: 32,
           exists: true
@@ -77,7 +77,7 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
           suggestion = value;
         });
         if (suggestion?.filename) {
-          item.filename = `/Users/liulu/Downloads/${suggestion.filename}`;
+          item.filename = `/Users/tester/Downloads/${suggestion.filename}`;
         }
         downloads.set(id, item);
         return id;
@@ -200,7 +200,7 @@ test("同一 aid 的并发点击只创建一次下载并通知全部标签", asy
   const [downloadId] = env.downloads.keys();
   assert.equal(
     env.downloads.get(downloadId).filename,
-    "/Users/liulu/Downloads/测试漫画/测试漫画 386225話.zip"
+    "/Users/tester/Downloads/测试漫画/测试漫画 386225話.zip"
   );
   env.downloads.get(downloadId).state = "complete";
   env.change({ id: downloadId, state: { current: "complete" } });
@@ -241,7 +241,7 @@ test("旧记录保存到错误根路径时允许按新目录结构重新下载",
         title: "测试漫画 386232話",
         comicName: "测试漫画",
         relativePath: "测试漫画/测试漫画 386232話.zip",
-        actualFilePath: "/Users/liulu/Downloads/测试漫画 386232話.zip",
+        actualFilePath: "/Users/tester/Downloads/测试漫画 386232話.zip",
         status: "downloaded",
         downloadId: oldId
       }],
@@ -253,7 +253,7 @@ test("旧记录保存到错误根路径时允许按新目录结构重新下载",
       state: "complete",
       url: "https://dl1.wn01.download/old.zip",
       finalUrl: "https://dl1.wn01.download/old.zip",
-      filename: "/Users/liulu/Downloads/测试漫画 386232話.zip",
+      filename: "/Users/tester/Downloads/测试漫画 386232話.zip",
       mime: "application/zip",
       fileSize: 10,
       exists: true
@@ -267,7 +267,7 @@ test("旧记录保存到错误根路径时允许按新目录结构重新下载",
   const newItem = env.downloads.get(901);
   assert.equal(
     newItem.filename,
-    "/Users/liulu/Downloads/测试漫画/测试漫画 386232話.zip"
+    "/Users/tester/Downloads/测试漫画/测试漫画 386232話.zip"
   );
 });
 
@@ -279,7 +279,7 @@ test("服务器失败会提示可能的 503 并清理残留文件", async () => 
   const item = env.downloads.get(result.downloadId);
   item.state = "interrupted";
   item.error = "SERVER_FAILED";
-  item.filename = "/Users/liulu/Downloads/server-error.html";
+  item.filename = "/Users/tester/Downloads/server-error.html";
   item.mime = "text/html";
   env.change({
     id: result.downloadId,
@@ -336,7 +336,7 @@ test("浏览器重启后从本地记录恢复并收敛已完成下载", async ()
       state: "complete",
       url: "https://dl1.wn01.download/test-386227.zip",
       finalUrl: "https://dl1.wn01.download/test-386227.zip",
-      filename: "/Users/liulu/Downloads/测试漫画/测试漫画 386227話.zip",
+      filename: "/Users/tester/Downloads/测试漫画/测试漫画 386227話.zip",
       mime: "application/zip",
       fileSize: 64
     }]])
@@ -348,7 +348,7 @@ test("浏览器重启后从本地记录恢复并收敛已完成下载", async ()
     "恢复流程应把已完成任务标记为 downloaded"
   );
   assert.equal(env.local.wnacgStateV1.quickDownloads[0].actualFilePath,
-    "/Users/liulu/Downloads/测试漫画/测试漫画 386227話.zip");
+    "/Users/tester/Downloads/测试漫画/测试漫画 386227話.zip");
 });
 
 test("精确主页允许一键下载，但详情页与伪造主机仍被拒绝", async () => {
