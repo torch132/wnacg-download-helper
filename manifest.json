@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "wnACG 更新助手",
+  "version": "1.4.6",
+  "description": "手动检测 wnACG 韩漫汉化栏目更新，并保存到用户授权的目录。",
+  "minimum_chrome_version": "109",
+  "permissions": ["storage", "activeTab", "scripting", "downloads"],
+  "host_permissions": [
+    "https://www.wnacg.com/*",
+    "https://*.wn01.download/*"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.wnacg.com/",
+        "https://www.wnacg.com/albums*",
+        "https://www.wnacg.com/search/*"
+      ],
+      "js": ["content-script.js"],
+      "css": ["content-script.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "打开 wnACG 更新助手",
+    "default_popup": "app.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  }
+}

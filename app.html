@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>wnACG 更新管理器</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">W</div>
+          <div>
+            <p class="eyebrow">WNACG TOOLKIT</p>
+            <h1>漫画更新管理器</h1>
+          </div>
+        </div>
+
+        <div class="directory-control" aria-labelledby="directory-label">
+          <span id="directory-label" class="control-label">保存目录</span>
+          <div class="directory-summary">
+            <span id="directory-indicator" class="status-dot is-offline" aria-hidden="true"></span>
+            <span id="directory-status" class="directory-status" role="status">尚未授权</span>
+            <span id="directory-name" class="directory-path" title="未选择目录">未选择目录</span>
+          </div>
+          <button id="choose-directory-btn" class="button button-secondary" type="button">
+            <span class="button-icon" aria-hidden="true">⌁</span>
+            选择目录
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="command-band" aria-labelledby="scan-heading">
+          <div class="command-copy">
+            <p class="section-kicker">手动检查</p>
+            <h2 id="scan-heading">韩漫 · 汉化</h2>
+            <p id="scan-status" class="muted" role="status" aria-live="polite">等待检查</p>
+          </div>
+          <div class="scan-progress-wrap">
+            <div class="progress-meta">
+              <span id="scan-progress-label">尚未开始</span>
+              <span id="scan-progress-value">0 / 20 页</span>
+            </div>
+            <div
+              id="scan-progress"
+              class="progress-track"
+              role="progressbar"
+              aria-label="检查进度"
+              aria-valuemin="0"
+              aria-valuemax="20"
+              aria-valuenow="0"
+            >
+              <span id="scan-progress-bar" class="progress-bar" style="width: 0%"></span>
+            </div>
+          </div>
+          <button id="scan-btn" class="button button-primary button-large" type="button">
+            <span class="button-icon" aria-hidden="true">↻</span>
+            检查更新
+          </button>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="workspace-section watch-section" aria-labelledby="watch-heading">
+            <div class="section-header">
+              <div>
+                <p class="section-kicker">WATCHLIST</p>
+                <h2 id="watch-heading">关注漫画</h2>
+              </div>
+              <span id="watch-count" class="count-badge">0</span>
+            </div>
+
+            <form id="watch-form" class="watch-form">
+              <label for="watch-prefix-input">漫画标题前缀</label>
+              <div class="input-action-row">
+                <input
+                  id="watch-prefix-input"
+                  name="prefix"
+                  type="text"
+                  autocomplete="off"
+                  maxlength="180"
+                  placeholder="输入完整漫画名前缀"
+                  required
+                >
+                <button id="watch-submit-btn" class="button button-dark" type="submit">
+                  <span class="button-icon" aria-hidden="true">＋</span>
+                  添加
+                </button>
+                <button id="watch-cancel-edit" class="button button-secondary" type="button" hidden>取消</button>
+              </div>
+              <p id="watch-form-error" class="field-message" role="alert" hidden></p>
+            </form>
+
+            <div id="watch-list" class="watch-list" aria-live="polite">
+              <div id="watch-empty" class="empty-state">
+                <span class="empty-icon" aria-hidden="true">◎</span>
+                <strong>暂无关注项</strong>
+                <span>添加标题前缀后即可建立更新基线</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="workspace-section updates-section" aria-labelledby="updates-heading">
+            <div class="section-header updates-header">
+              <div>
+                <p class="section-kicker">UPDATE QUEUE</p>
+                <h2 id="updates-heading">更新队列</h2>
+              </div>
+              <div class="summary-chips" aria-label="更新统计">
+                <span class="summary-chip"><b id="pending-count">0</b> 待处理</span>
+                <span class="summary-chip is-error"><b id="failed-count">0</b> 失败</span>
+              </div>
+            </div>
+
+            <div class="batch-toolbar" aria-label="批量操作">
+              <label class="checkbox-label" for="select-all-updates">
+                <input id="select-all-updates" type="checkbox">
+                <span>全选</span>
+              </label>
+              <span id="selection-count" class="selection-count">已选 0 项</span>
+              <div class="batch-actions">
+                <button id="retry-failed-btn" class="button button-ghost" type="button" disabled>
+                  <span class="button-icon" aria-hidden="true">↺</span>
+                  重试失败
+                </button>
+                <button id="ignore-selected-btn" class="button button-ghost" type="button" disabled>
+                  <span class="button-icon" aria-hidden="true">×</span>
+                  忽略
+                </button>
+                <button id="download-selected-btn" class="button button-accent" type="button" disabled>
+                  <span class="button-icon" aria-hidden="true">↓</span>
+                  下载选中项
+                </button>
+              </div>
+            </div>
+
+            <div class="update-column-headings" aria-hidden="true">
+              <span>章节</span>
+              <span>AID</span>
+              <span>发现时间</span>
+              <span>状态</span>
+            </div>
+
+            <div id="updates-list" class="updates-list" aria-live="polite">
+              <div id="updates-empty" class="empty-state empty-state-wide">
+                <span class="empty-icon" aria-hidden="true">✓</span>
+                <strong>更新队列为空</strong>
+                <span>完成检查后，新章节会显示在这里</span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section class="activity-section" aria-labelledby="activity-heading">
+          <div class="section-header">
+            <div>
+              <p class="section-kicker">ACTIVITY</p>
+              <h2 id="activity-heading">活动记录</h2>
+            </div>
+            <button id="clear-activity-btn" class="button button-ghost button-compact" type="button">清空</button>
+          </div>
+          <ol id="activity-list" class="activity-list" aria-live="polite">
+            <li id="activity-empty" class="activity-empty">尚无活动记录</li>
+          </ol>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog" class="dialog-content">
+        <div class="dialog-icon" aria-hidden="true">!</div>
+        <div>
+          <h2 id="confirm-title">确认操作</h2>
+          <p id="confirm-message">此操作需要确认。</p>
+        </div>
+        <div class="dialog-actions">
+          <button id="confirm-cancel" class="button button-secondary" type="button">取消</button>
+          <button id="confirm-ok" class="button button-danger" type="button">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="watch-item-template">
+      <article class="watch-item">
+        <div class="watch-item-main">
+          <label class="switch" title="启用或停用关注">
+            <input class="watch-enabled" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="sr-only">启用关注</span>
+          </label>
+          <div class="watch-copy">
+            <strong class="watch-title"></strong>
+            <span class="watch-baseline"></span>
+          </div>
+        </div>
+        <div class="item-actions">
+          <button class="icon-button watch-edit" type="button" title="编辑" aria-label="编辑关注项">✎</button>
+          <button class="icon-button is-danger watch-delete" type="button" title="删除" aria-label="删除关注项">×</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="update-group-template">
+      <section class="update-group">
+        <header class="update-group-header">
+          <button class="update-group-toggle" type="button" aria-expanded="false">
+            <span class="update-group-chevron" aria-hidden="true">›</span>
+            <span class="update-group-title"></span>
+            <span class="update-group-count"></span>
+          </button>
+        </header>
+        <div class="update-group-rows" hidden></div>
+      </section>
+    </template>
+
+    <template id="update-row-template">
+      <article class="update-row">
+        <label class="row-check">
+          <input class="update-checkbox" type="checkbox">
+          <span class="sr-only">选择章节</span>
+        </label>
+        <div class="update-title-cell">
+          <strong class="update-title"></strong>
+          <span class="update-error" hidden></span>
+        </div>
+        <span class="update-aid"></span>
+        <time class="update-discovered"></time>
+        <span class="status-pill update-status"></span>
+      </article>
+    </template>
+  </body>
+</html>

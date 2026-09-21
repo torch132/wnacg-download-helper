@@ -1,0 +1,16 @@
+.DS_Store
+.env*
+*.log
+*.tmp
+*.swp
+*~
+*.zip
+*.crx
+*.pem
+*.key
+node_modules/
+coverage/
+.nyc_output/
+.idea/
+.vscode/
+tasks/

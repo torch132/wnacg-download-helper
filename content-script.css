@@ -1,0 +1,107 @@
+.wnacg-helper-download {
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: -2px 0 -4px 6px;
+  padding: 0;
+  vertical-align: middle;
+  border: 1px solid #b95f1f;
+  border-radius: 5px;
+  background: #d1782c;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.wnacg-helper-title-token {
+  padding: 0 0.18em;
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  font-weight: 700;
+}
+
+.wnacg-helper-title-token.is-translation {
+  background: #ff677d;
+  color: #4a1822;
+}
+
+.wnacg-helper-title-token.is-dl {
+  background: #a8e6cf;
+  color: #24483d;
+}
+
+.wnacg-helper-download:hover:not(:disabled) {
+  background: #a85518;
+}
+
+.wnacg-helper-download:focus-visible {
+  outline: 3px solid rgba(209, 120, 44, 0.35);
+  outline-offset: 2px;
+}
+
+.wnacg-helper-download svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.wnacg-helper-download[data-state="downloading"] {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.wnacg-helper-download[data-state="downloading"] svg {
+  animation: wnacg-helper-pulse 900ms ease-in-out infinite alternate;
+}
+
+.wnacg-helper-download[data-state="complete"] {
+  border-color: #207547;
+  background: #2c8a5c;
+}
+
+.wnacg-helper-download[data-state="error"] {
+  border-color: #99332f;
+  background: #b6423d;
+}
+
+#wnacg-helper-toast-region {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 2147483647;
+  display: grid;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.wnacg-helper-toast {
+  padding: 10px 13px;
+  border-radius: 6px;
+  background: #26332d;
+  color: #fff;
+  font: 600 13px/1.45 system-ui, sans-serif;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.wnacg-helper-toast.is-success {
+  background: #256b47;
+}
+
+.wnacg-helper-toast.is-error {
+  background: #9b3732;
+}
+
+@keyframes wnacg-helper-pulse {
+  from { transform: translateY(-1px); opacity: 0.55; }
+  to { transform: translateY(1px); opacity: 1; }
+}
