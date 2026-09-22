@@ -9,12 +9,19 @@ function deferred() {
   return { promise, resolve };
 }
 
-function downloadPage(aid) {
-  return `<!doctype html><title>测试漫画 ${aid}話.zip 下載 - 紳士漫畫</title>
+function downloadPage(aid, title = `测试漫画 ${aid}話`) {
+  return `<!doctype html><title>${title}.zip 下載 - 紳士漫畫</title>
     <a class="ads" href="https://dl1.wn01.download/test-${aid}.zip">备用下载</a>`;
 }
 
-function createEnvironment({ localState, initialDownloads = new Map(), fetchGate } = {}) {
+function createEnvironment({
+  localState,
+  initialDownloads = new Map(),
+  fetchGate,
+  pageTitle,
+  redirectUrl,
+  downloadError
+} = {}) {
   let local = {
     wnacgStateV1: localState || {
       version: 1,
@@ -59,6 +66,7 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
     },
     downloads: {
       async download(options) {
+        if (downloadError) throw downloadError;
         downloadCalls += 1;
         downloadOptions.push(structuredClone(options));
         const id = 900 + downloadCalls;
@@ -66,7 +74,7 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
           id,
           state: "in_progress",
           url: options.url,
-          finalUrl: options.url,
+          finalUrl: redirectUrl || options.url,
           filename: `/Users/tester/Downloads/server-name-${id}.zip`,
           mime: "application/zip",
           fileSize: 32,
@@ -115,7 +123,7 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
       if (fetchGate) await fetchGate.promise;
       return {
         ok: true,
-        text: async () => downloadPage(aid)
+        text: async () => downloadPage(aid, pageTitle || `测试漫画 ${aid}話`)
       };
     }
     throw new Error(`不应由 fetch 预请求 ZIP：${url}`);
@@ -132,10 +140,18 @@ function createEnvironment({ localState, initialDownloads = new Map(), fetchGate
     get local() {
       return local;
     },
-    async send(aid, tabId, url = "https://www.wnacg.com/albums-index.html") {
+    get session() {
+      return session;
+    },
+    async send(
+      aid,
+      tabId,
+      url = "https://www.wnacg.com/albums-index.html",
+      title = `测试漫画 ${aid}話`
+    ) {
       return new Promise((resolve) => {
         const keepAlive = messageListener(
-          { type: "WNACG_QUICK_DOWNLOAD", aid: String(aid), title: `测试漫画 ${aid}話` },
+          { type: "WNACG_QUICK_DOWNLOAD", aid: String(aid), title },
           { tab: { id: tabId, url } },
           resolve
         );
@@ -209,6 +225,63 @@ test("同一 aid 的并发点击只创建一次下载并通知全部标签", asy
   assert.equal(env.local.wnacgStateV1.quickDownloads[0].status, "downloaded");
   assert.equal(env.local.wnacgStateV1.updates[0].status, "downloaded");
   assert.equal(env.local.wnacgStateV1.updates[0].downloadMethod, "quick");
+});
+
+test("长标题按完整路径预算并优先使用列表标题作为目录名", async () => {
+  const pageTitle = `${"服务器拼接标题 ".repeat(80)}1~6 [中国翻訳] [無修正] [DL版]`;
+  const requestTitle = "[陸の孤島亭 (しゃよー)] 桜春女学院の男優 1~6 [中国翻訳] [無修正] [DL版]";
+  const env = createEnvironment({ pageTitle });
+  await importBackground("long-title-path");
+
+  const result = await env.send("386240", 51, undefined, requestTitle);
+  assert.equal(result.state, "downloading");
+  const relativePath = env.downloadOptions[0].filename;
+  assert.ok(new TextEncoder().encode(relativePath).byteLength <= 240);
+  assert.match(relativePath, /^\[陸の孤島亭 \(しゃよー\)\] 桜春女学院の男優\//u);
+  assert.match(relativePath, /\/\[陸の孤島亭 \(しゃよー\)\] 桜春女学院の男優 1~6 \[中国翻訳\] \[無修正\] \[DL版\]\.zip$/u);
+  assert.doesNotMatch(relativePath, /服务器拼接标题/u);
+  assert.ok(Object.values(env.session.wnacgFilenamePaths || {}).includes(relativePath));
+});
+
+test("重定向后仍强制使用目标相对路径", async () => {
+  const env = createEnvironment({
+    redirectUrl: "https://dl2.wn01.download/redirected-file.zip"
+  });
+  await importBackground("redirect-filename");
+
+  const result = await env.send("386241", 52);
+  assert.equal(result.state, "downloading");
+  assert.equal(
+    env.downloads.get(result.downloadId).filename,
+    "/Users/tester/Downloads/测试漫画/测试漫画 386241話.zip"
+  );
+});
+
+test("同名文件的 Chrome 冲突后缀仍视为成功", async () => {
+  const env = createEnvironment();
+  await importBackground("uniquified-filename");
+
+  const result = await env.send("386242", 53);
+  const item = env.downloads.get(result.downloadId);
+  item.filename = "/Users/tester/Downloads/测试漫画/测试漫画 386242話 (1).zip";
+  item.state = "complete";
+  env.change({ id: result.downloadId, state: { current: "complete" } });
+
+  await waitFor(
+    () => env.local.wnacgStateV1.quickDownloads[0]?.status === "downloaded",
+    "Chrome 的同名冲突后缀应保持 downloaded 状态"
+  );
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].status, "downloaded");
+});
+
+test("Invalid filename 会转换为可恢复的中文提示", async () => {
+  const env = createEnvironment({ downloadError: new Error("Invalid filename") });
+  await importBackground("invalid-filename");
+
+  const result = await env.send("386243", 54);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /文件名仍不符合 Chrome 要求/);
+  assert.deepEqual(env.session.wnacgFilenamePaths || {}, {});
 });
 
 test("外置目录已下载不会阻止 Downloads 一键下载", async () => {

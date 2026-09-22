@@ -327,6 +327,7 @@ export function truncateUtf8(value, maxBytes = 180) {
 
 const CHAPTER_SUFFIX_PATTERN = /(?:^|\s)((?:全\s*)?(?:第\s*)?\d+(?:\.\d+)?(?:\s*[-–—~至]\s*\d+(?:\.\d+)?)?\s*(?:話|话|回|章|卷|巻)|(?:ch(?:apter)?|ep(?:isode)?)\.?\s*\d+(?:\.\d+)?(?:\s*[-–—~至]\s*\d+(?:\.\d+)?)?)(?:\s*[\[(（]?(?:完|完結|完结)[\])）]?)?$/iu;
 const CHAPTER_REMAINDER_PATTERN = /^((?:(?:全\s*)?(?:第\s*)?\d+(?:\.\d+)?(?:\s*[-–—~至]\s*\d+(?:\.\d+)?)?\s*(?:話|话|回|章|卷|巻)?|(?:ch(?:apter)?|ep(?:isode)?)\.?\s*\d+(?:\.\d+)?(?:\s*[-–—~至]\s*\d+(?:\.\d+)?)?|(?:番外篇|外傳|外传|特別篇|特别篇|序章|終章|终章|後記|后记)(?:\s*\d+)?))(?:\s*[\[(（]?(?:完|完結|完结)[\])）]?)?$/iu;
+const BARE_CHAPTER_SUFFIX_PATTERN = /\s+(?:第\s*)?\d+(?:\.\d+)?\s*[-–—~至]\s*\d+(?:\.\d+)?\s*$/u;
 
 function compactChapterLabel(value) {
   return value
@@ -363,7 +364,10 @@ export function formatBaselineLabel(watch = {}) {
 export function deriveComicName(title) {
   const value = String(title ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
   const withoutTags = value.replace(/(?:\s*\[[^\]\r\n]{1,80}\])+\s*$/gu, "").trim();
-  const withoutChapter = withoutTags.replace(CHAPTER_SUFFIX_PATTERN, "").trim();
+  const withoutChapter = withoutTags
+    .replace(CHAPTER_SUFFIX_PATTERN, "")
+    .replace(BARE_CHAPTER_SUFFIX_PATTERN, "")
+    .trim();
   return withoutChapter || withoutTags || value || "一键下载";
 }
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "wnACG 更新助手",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "description": "手动检测 wnACG 韩漫汉化栏目更新，并保存到用户授权的目录。",
   "minimum_chrome_version": "109",
   "permissions": ["storage", "activeTab", "scripting", "downloads"],

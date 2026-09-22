@@ -13,7 +13,11 @@ const QUICK_DOWNLOAD = "WNACG_QUICK_DOWNLOAD";
 const QUICK_DOWNLOAD_STATUS = "WNACG_QUICK_DOWNLOAD_STATUS";
 const QUICK_DOWNLOAD_STATES = "WNACG_QUICK_DOWNLOAD_STATES";
 const ACTIVE_KEY = "wnacgQuickDownloads";
+const FILENAME_PATHS_KEY = "wnacgFilenamePaths";
 const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_RELATIVE_PATH_BYTES = 240;
+const MAX_FOLDER_BYTES = 80;
+const MAX_FILE_BASE_BYTES = 180;
 const startFlights = new Map();
 const activeMemory = new Map();
 const finishPromises = new Map();
@@ -22,7 +26,35 @@ const desiredPathsByUrl = new Map();
 const desiredPathsByDownloadId = new Map();
 let stateWriteQueue = Promise.resolve();
 let activeWriteQueue = Promise.resolve();
+let filenamePathsWriteQueue = Promise.resolve();
 let recoveryPromise = null;
+
+async function loadFilenamePaths() {
+  try {
+    const stored = await chrome.storage.session.get(FILENAME_PATHS_KEY);
+    for (const [key, relativePath] of Object.entries(stored[FILENAME_PATHS_KEY] || {})) {
+      if (key && typeof relativePath === "string" && relativePath) {
+        desiredPathsByUrl.set(key, relativePath);
+      }
+    }
+  } catch (error) {
+    console.warn("wnACG 下载路径映射恢复失败", error);
+  }
+}
+
+const filenamePathsReady = loadFilenamePaths();
+
+function mutateFilenamePaths(mutator) {
+  const operation = filenamePathsWriteQueue.then(async () => {
+    await filenamePathsReady;
+    const stored = await chrome.storage.session.get(FILENAME_PATHS_KEY);
+    const paths = { ...(stored[FILENAME_PATHS_KEY] || {}) };
+    await mutator(paths);
+    await chrome.storage.session.set({ [FILENAME_PATHS_KEY]: paths });
+  });
+  filenamePathsWriteQueue = operation.catch(() => {});
+  return operation;
+}
 
 function validateSource(sender) {
   try {
@@ -91,8 +123,10 @@ function mutateAppState(mutator) {
   return operation;
 }
 
-function comicNameFor(title, watches) {
-  const matched = findLongestPrefixMatch(title, watches);
+function comicNameFor(title, watches, fallbackTitle = "") {
+  const matched =
+    findLongestPrefixMatch(title, watches) ||
+    findLongestPrefixMatch(fallbackTitle, watches);
   return String(matched?.prefix || matched?.titlePrefix || deriveComicName(title)).trim();
 }
 
@@ -100,20 +134,80 @@ function pathComponent(value, fallback, maxBytes) {
   return truncateUtf8(sanitizeFileName(value, fallback), maxBytes) || fallback;
 }
 
-function downloadUrlKey(value) {
+function utf8Length(value) {
+  return new TextEncoder().encode(String(value ?? "")).byteLength;
+}
+
+function buildRelativePath(comicName, officialTitle, aid) {
+  const folder = pathComponent(comicName, "一键下载", MAX_FOLDER_BYTES);
+  const fallback = `wnacg-${aid}`;
+  const initialFileBase = pathComponent(officialTitle, fallback, MAX_FILE_BASE_BYTES);
+  const availableFileBytes = Math.max(
+    utf8Length(fallback),
+    MAX_RELATIVE_PATH_BYTES - utf8Length(folder) - 1 - utf8Length(".zip")
+  );
+  const fileBase =
+    truncateUtf8(initialFileBase, availableFileBytes) ||
+    truncateUtf8(fallback, availableFileBytes) ||
+    "wnacg";
+  const relativePath = `${folder}/${fileBase}.zip`;
+  if (utf8Length(relativePath) <= MAX_RELATIVE_PATH_BYTES) return relativePath;
+
+  const emergencyFileBytes = Math.max(1, MAX_RELATIVE_PATH_BYTES - utf8Length(folder) - 1 - 4);
+  const emergencyFileBase = truncateUtf8(fallback, emergencyFileBytes) || "wnacg";
+  return `${folder}/${emergencyFileBase}.zip`;
+}
+
+function downloadUrlKeys(value) {
   try {
     const url = new URL(String(value));
     url.hash = "";
-    return url.href;
+    return [...new Set([url.href, `${url.origin}${url.pathname}`])];
   } catch {
-    return String(value || "");
+    const key = String(value || "");
+    return key ? [key] : [];
   }
+}
+
+async function rememberFilenamePath(url, relativePath) {
+  await filenamePathsReady;
+  const keys = downloadUrlKeys(url);
+  for (const key of keys) desiredPathsByUrl.set(key, relativePath);
+  await mutateFilenamePaths((paths) => {
+    for (const key of keys) paths[key] = relativePath;
+  }).catch((error) => {
+    console.warn("wnACG 下载路径映射保存失败", error);
+  });
+}
+
+async function forgetFilenamePath(url, relativePath) {
+  await filenamePathsReady;
+  const keys = downloadUrlKeys(url);
+  for (const key of keys) {
+    if (desiredPathsByUrl.get(key) === relativePath) desiredPathsByUrl.delete(key);
+  }
+  await mutateFilenamePaths((paths) => {
+    for (const key of keys) {
+      if (paths[key] === relativePath) delete paths[key];
+    }
+  }).catch((error) => {
+    console.warn("wnACG 下载路径映射清理失败", error);
+  });
 }
 
 function pathMatchesRelative(actualPath, relativePath) {
   const actual = String(actualPath || "").replaceAll("\\", "/");
   const relative = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+/, "");
-  return Boolean(actual && relative && (actual === relative || actual.endsWith(`/${relative}`)));
+  if (!actual || !relative) return false;
+  if (actual === relative || actual.endsWith(`/${relative}`)) return true;
+
+  // Chrome 的 uniquify 会在文件扩展名前追加 " (1)"，这仍属于同一目标路径。
+  const extensionMatch = relative.match(/(\.[^./]+)$/u);
+  if (!extensionMatch) return false;
+  const extension = extensionMatch[1];
+  const stem = relative.slice(0, -extension.length);
+  const escaped = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`${escaped(stem)} \\(\\d+\\)${escaped(extension)}$`, "u").test(actual);
 }
 
 async function completedQuickDownloadExists(record) {
@@ -138,9 +232,18 @@ function readableDownloadError(errorCode) {
     NETWORK_FAILED: "网络连接失败，请检查代理或网络后重试",
     NETWORK_TIMEOUT: "下载连接超时，请稍后重试",
     FILE_FAILED: "Chrome 无法写入目标文件",
-    USER_CANCELED: "下载已取消"
+    USER_CANCELED: "下载已取消",
+    INVALID_FILENAME: "文件名仍不符合 Chrome 要求，请重试"
   };
   return messages[errorCode] || errorCode || "未知原因";
+}
+
+function readableDownloadException(error) {
+  const message = error?.message || String(error || "未知原因");
+  if (/invalid[ _-]?filename/iu.test(message)) {
+    return "文件名仍不符合 Chrome 要求，请重试";
+  }
+  return message;
 }
 
 function mergeTabIds(...collections) {
@@ -226,13 +329,11 @@ async function startQuickDownload(request, flight) {
   const zipUrl = parseDownloadPageText(html, { baseUrl: downloadPageUrl });
   const officialTitle = parseDownloadTitleText(html) || request.title;
   const latestState = await loadAppState();
-  const comicName = comicNameFor(officialTitle, latestState.watches);
-  const folder = pathComponent(comicName, "一键下载", 120);
-  const fileBase = pathComponent(officialTitle, `wnacg-${aid}`, 180);
-  const relativePath = `${folder}/${fileBase}.zip`;
+  const comicName = comicNameFor(request.title, latestState.watches, officialTitle);
+  const fileTitle = request.title || officialTitle;
+  const relativePath = buildRelativePath(comicName, fileTitle, aid);
 
-  const urlKey = downloadUrlKey(zipUrl);
-  desiredPathsByUrl.set(urlKey, relativePath);
+  await rememberFilenamePath(zipUrl, relativePath);
   let downloadId;
   try {
     downloadId = await chrome.downloads.download({
@@ -242,18 +343,18 @@ async function startQuickDownload(request, flight) {
       saveAs: false
     });
   } catch (error) {
-    desiredPathsByUrl.delete(urlKey);
+    await forgetFilenamePath(zipUrl, relativePath);
     throw error;
   }
   if (!Number.isInteger(downloadId)) {
-    desiredPathsByUrl.delete(urlKey);
+    await forgetFilenamePath(zipUrl, relativePath);
     throw new Error("Chrome 未能创建下载任务。");
   }
   desiredPathsByDownloadId.set(downloadId, relativePath);
 
   const metadata = {
     aid,
-    title: officialTitle,
+    title: fileTitle,
     comicName,
     zipUrl,
     relativePath,
@@ -419,7 +520,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
   }
   activeMemory.delete(downloadId);
   desiredPathsByDownloadId.delete(downloadId);
-  if (metadata.zipUrl) desiredPathsByUrl.delete(downloadUrlKey(metadata.zipUrl));
+  if (metadata.zipUrl) await forgetFilenamePath(metadata.zipUrl, metadata.relativePath);
   await mutateActiveDownloads((latest) => {
     delete latest[String(downloadId)];
   });
@@ -445,6 +546,7 @@ async function markRecoveryFailure(record, reason) {
 }
 
 async function recoverQuickDownloads() {
+  await filenamePathsReady;
   const [active, state] = await Promise.all([readActiveDownloads(), loadAppState()]);
   const records = new Map();
   for (const [id, metadata] of Object.entries(active)) {
@@ -469,6 +571,11 @@ async function recoverQuickDownloads() {
     activeMemory.set(downloadId, metadata);
     if (metadata.relativePath) {
       desiredPathsByDownloadId.set(downloadId, metadata.relativePath);
+      if (metadata.zipUrl) {
+        for (const key of downloadUrlKeys(metadata.zipUrl)) {
+          desiredPathsByUrl.set(key, metadata.relativePath);
+        }
+      }
     }
     let item;
     try {
@@ -527,20 +634,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handler(message, sender)
     .then(sendResponse)
     .catch((error) =>
-      sendResponse({ ok: false, state: "error", message: error?.message || String(error) })
+      sendResponse({ ok: false, state: "error", message: readableDownloadException(error) })
     );
   return true;
 });
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  const urlKeys = [downloadUrlKey(item.url), downloadUrlKey(item.finalUrl)];
+  const urlKeys = [
+    ...downloadUrlKeys(item.url),
+    ...downloadUrlKeys(item.finalUrl)
+  ].filter((key, index, keys) => key && keys.indexOf(key) === index);
   const relativePath =
     desiredPathsByDownloadId.get(item.id) ||
     urlKeys.map((key) => desiredPathsByUrl.get(key)).find(Boolean);
   if (!relativePath) return;
 
   desiredPathsByDownloadId.set(item.id, relativePath);
-  for (const key of urlKeys) desiredPathsByUrl.delete(key);
   suggest({ filename: relativePath, conflictAction: "uniquify" });
 });
 

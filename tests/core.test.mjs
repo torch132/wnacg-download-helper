@@ -141,8 +141,13 @@ test("deriveComicName 从常见话数后缀推断漫画目录名", () => {
     core.deriveComicName("中了傳教士的美人計 34-35話 [無修正] [DL版]"),
     "中了傳教士的美人計",
   );
+  assert.equal(
+    core.deriveComicName("[陸の孤島亭 (しゃよー)] 桜春女学院の男優 1~6 [中国翻訳] [無修正] [DL版]"),
+    "[陸の孤島亭 (しゃよー)] 桜春女学院の男優",
+  );
   assert.equal(core.deriveComicName("作品名稱 [中国翻訳]"), "作品名稱");
   assert.equal(core.deriveComicName("Single Volume [DL版]"), "Single Volume");
+  assert.equal(core.deriveComicName("Room 101"), "Room 101");
   assert.equal(core.deriveComicName(""), "一键下载");
   assert.equal(new TextEncoder().encode(core.truncateUtf8("漫画".repeat(100), 120)).byteLength, 120);
   assert.equal(core.truncateUtf8("abc. ", 20), "abc");
