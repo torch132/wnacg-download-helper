@@ -66,9 +66,12 @@ function createEnvironment({
     },
     downloads: {
       async download(options) {
-        if (downloadError) throw downloadError;
         downloadCalls += 1;
         downloadOptions.push(structuredClone(options));
+        const currentError = typeof downloadError === "function"
+          ? downloadError(downloadCalls)
+          : downloadError;
+        if (currentError) throw currentError;
         const id = 900 + downloadCalls;
         const item = {
           id,
@@ -280,8 +283,22 @@ test("Invalid filename 会转换为可恢复的中文提示", async () => {
 
   const result = await env.send("386243", 54);
   assert.equal(result.ok, false);
-  assert.match(result.message, /文件名仍不符合 Chrome 要求/);
+  assert.match(result.message, /Chrome 拒绝了下载文件名/);
   assert.deepEqual(env.session.wnacgFilenamePaths || {}, {});
+});
+
+test("首选文件名被 Chrome 拒绝时保留漫画目录并用 aid 文件名重试", async () => {
+  const env = createEnvironment({
+    downloadError: (attempt) => attempt === 1 ? new Error("Invalid filename") : null
+  });
+  await importBackground("invalid-filename-retry");
+
+  const result = await env.send("386244", 55);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 2);
+  assert.equal(env.downloadOptions[0].filename, "测试漫画/测试漫画 386244話.zip");
+  assert.equal(env.downloadOptions[1].filename, "测试漫画/wnacg-386244.zip");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].relativePath, "测试漫画/wnacg-386244.zip");
 });
 
 test("外置目录已下载不会阻止 Downloads 一键下载", async () => {

@@ -158,6 +158,29 @@ function buildRelativePath(comicName, officialTitle, aid) {
   return `${folder}/${emergencyFileBase}.zip`;
 }
 
+function isInvalidFilenameError(error) {
+  return /invalid[ _-]?filename/iu.test(error?.message || String(error || ""));
+}
+
+async function createChromeDownload(zipUrl, relativePath) {
+  await rememberFilenamePath(zipUrl, relativePath);
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: zipUrl,
+      filename: relativePath,
+      conflictAction: "uniquify",
+      saveAs: false
+    });
+    if (!Number.isInteger(downloadId)) {
+      throw new Error("Chrome 未能创建下载任务。");
+    }
+    return downloadId;
+  } catch (error) {
+    await forgetFilenamePath(zipUrl, relativePath);
+    throw error;
+  }
+}
+
 function downloadUrlKeys(value) {
   try {
     const url = new URL(String(value));
@@ -233,15 +256,15 @@ function readableDownloadError(errorCode) {
     NETWORK_TIMEOUT: "下载连接超时，请稍后重试",
     FILE_FAILED: "Chrome 无法写入目标文件",
     USER_CANCELED: "下载已取消",
-    INVALID_FILENAME: "文件名仍不符合 Chrome 要求，请重试"
+    INVALID_FILENAME: "Chrome 拒绝了下载文件名，请重试"
   };
   return messages[errorCode] || errorCode || "未知原因";
 }
 
 function readableDownloadException(error) {
   const message = error?.message || String(error || "未知原因");
-  if (/invalid[ _-]?filename/iu.test(message)) {
-    return "文件名仍不符合 Chrome 要求，请重试";
+  if (isInvalidFilenameError(error)) {
+    return "Chrome 拒绝了下载文件名，请重试";
   }
   return message;
 }
@@ -331,24 +354,17 @@ async function startQuickDownload(request, flight) {
   const latestState = await loadAppState();
   const comicName = comicNameFor(request.title, latestState.watches, officialTitle);
   const fileTitle = request.title || officialTitle;
-  const relativePath = buildRelativePath(comicName, fileTitle, aid);
-
-  await rememberFilenamePath(zipUrl, relativePath);
+  let relativePath = buildRelativePath(comicName, fileTitle, aid);
   let downloadId;
   try {
-    downloadId = await chrome.downloads.download({
-      url: zipUrl,
-      filename: relativePath,
-      conflictAction: "uniquify",
-      saveAs: false
-    });
+    downloadId = await createChromeDownload(zipUrl, relativePath);
   } catch (error) {
-    await forgetFilenamePath(zipUrl, relativePath);
-    throw error;
-  }
-  if (!Number.isInteger(downloadId)) {
-    await forgetFilenamePath(zipUrl, relativePath);
-    throw new Error("Chrome 未能创建下载任务。");
+    if (!isInvalidFilenameError(error)) throw error;
+    // 首选标题仍被 Chrome 拒绝时，保留漫画目录并改用只含 aid 的安全文件名重试。
+    const fallbackPath = buildRelativePath(comicName, `wnacg-${aid}`, aid);
+    if (fallbackPath === relativePath) throw error;
+    relativePath = fallbackPath;
+    downloadId = await createChromeDownload(zipUrl, relativePath);
   }
   desiredPathsByDownloadId.set(downloadId, relativePath);
 
@@ -374,7 +390,7 @@ async function startQuickDownload(request, flight) {
         ...(current || {}),
         aid,
         comicName,
-        title: officialTitle,
+        title: fileTitle,
         status: "downloading",
         relativePath,
         downloadId,

@@ -301,7 +301,7 @@ export function parseDownloadPageHtml(
 export function sanitizeFileName(value, fallback = "untitled") {
   const clean = (input) => String(input ?? "")
     .normalize("NFKC")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, "")
     .replace(/[\\/:*?"<>|]/gu, "_")
     .replace(/\s+/gu, " ")
     .replace(/[. ]+$/u, "")

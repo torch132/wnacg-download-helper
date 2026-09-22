@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用最小权限并通过 action popup 打开管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.4.8");
+  assert.equal(manifest.version, "1.4.9");
   assert.deepEqual(manifest.permissions, ["storage", "activeTab", "scripting", "downloads"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://www.wnacg.com/*",

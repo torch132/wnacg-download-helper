@@ -130,6 +130,7 @@ test("sanitizeFileName 保留中文并替换路径非法字符", () => {
     "獵艷管理員_ 55_56話_ _完_",
   );
   assert.equal(core.sanitizeFileName("\u0000 ... ", "未命名"), "未命名");
+  assert.equal(core.sanitizeFileName("标题\u2028分隔\u2029符"), "标题分隔符");
   assert.equal(core.sanitizeFileName("", "备选/名称?"), "备选_名称_");
 });
 
