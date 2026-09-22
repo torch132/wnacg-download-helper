@@ -734,6 +734,11 @@ input[type="checkbox"] {
   color: #24483d;
 }
 
+.title-token.is-uncensored {
+  background: #6a9cbb;
+  color: #142b38;
+}
+
 .file-path {
   display: block;
   margin-top: 3px;

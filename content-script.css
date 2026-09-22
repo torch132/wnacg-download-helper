@@ -34,6 +34,11 @@
   color: #24483d;
 }
 
+.wnacg-helper-title-token.is-uncensored {
+  background: #6a9cbb;
+  color: #142b38;
+}
+
 .wnacg-helper-download:hover:not(:disabled) {
   background: #a85518;
 }

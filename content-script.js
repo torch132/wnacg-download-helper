@@ -23,11 +23,18 @@
 
   function splitTitleTags(value) {
     return String(value ?? "")
-      .split(/(\[中国翻訳\]|\[DL版\])/gu)
+      .split(/(\[中国翻訳\]|\[DL版\]|\[無修正\])/gu)
       .filter(Boolean)
       .map((text) => ({
         text,
-        kind: text === "[中国翻訳]" ? "translation" : text === "[DL版]" ? "dl" : null
+        kind:
+          text === "[中国翻訳]"
+            ? "translation"
+            : text === "[DL版]"
+              ? "dl"
+              : text === "[無修正]"
+                ? "uncensored"
+                : null
       }));
   }
 

@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用最小权限并通过 action popup 打开管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.4.6");
+  assert.equal(manifest.version, "1.4.7");
   assert.deepEqual(manifest.permissions, ["storage", "activeTab", "scripting", "downloads"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://www.wnacg.com/*",
@@ -140,6 +140,7 @@ test("列表页下载图标注入日期区域并通过后台保存到漫画目�
   assert.match(css, /\.wnacg-helper-download\s*\{/);
   assert.match(css, /\.wnacg-helper-title-token\.is-translation\s*\{[^}]*#ff677d;[^}]*#4a1822;/s);
   assert.match(css, /\.wnacg-helper-title-token\.is-dl\s*\{[^}]*#a8e6cf;[^}]*#24483d;/s);
+  assert.match(css, /\.wnacg-helper-title-token\.is-uncensored\s*\{[^}]*#6a9cbb;/s);
   assert.match(css, /vertical-align:\s*middle/);
   assert.match(background, /parseDownloadPageText/);
   assert.match(background, /parseDownloadTitleText/);
@@ -164,6 +165,7 @@ test("弹窗使用相同的莫兰迪红绿高亮标题标签", async () => {
   assert.doesNotMatch(app, /innerHTML\s*=/);
   assert.match(css, /\.title-token\.is-translation\s*\{[^}]*#ff677d;[^}]*#4a1822;/s);
   assert.match(css, /\.title-token\.is-dl\s*\{[^}]*#a8e6cf;[^}]*#24483d;/s);
+  assert.match(css, /\.title-token\.is-uncensored\s*\{[^}]*#6a9cbb;/s);
 });
 
 test("更新话数按漫画默认收起并支持点击展开", async () => {

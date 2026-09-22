@@ -19,13 +19,14 @@ test("normalizeTitle 执行 NFKC、空白折叠和大小写统一", () => {
   assert.equal(core.normalizeTitle(null), "");
 });
 
-test("splitTitleTags 只分段精确匹配的翻译与 DL 标签", () => {
+test("splitTitleTags 只分段精确匹配的标题标签", () => {
   assert.deepEqual(
-    core.splitTitleTags("作品 [中国翻訳][DL版] 12話"),
+    core.splitTitleTags("作品 [中国翻訳][DL版][無修正] 12話"),
     [
       { text: "作品 ", kind: null },
       { text: "[中国翻訳]", kind: "translation" },
       { text: "[DL版]", kind: "dl" },
+      { text: "[無修正]", kind: "uncensored" },
       { text: " 12話", kind: null },
     ],
   );
@@ -35,6 +36,10 @@ test("splitTitleTags 只分段精确匹配的翻译与 DL 标签", () => {
   assert.deepEqual(core.splitTitleTags('<img onerror="x">[DL版]'), [
     { text: '<img onerror="x">', kind: null },
     { text: "[DL版]", kind: "dl" },
+  ]);
+  assert.deepEqual(core.splitTitleTags("[無修正品] [無修正]"), [
+    { text: "[無修正品] ", kind: null },
+    { text: "[無修正]", kind: "uncensored" },
   ]);
 });
 

@@ -42,7 +42,7 @@ export function normalizeTitle(value) {
     .toLocaleLowerCase("zh-Hans-CN");
 }
 
-const TITLE_TAG_PATTERN = /(\[中国翻訳\]|\[DL版\])/gu;
+const TITLE_TAG_PATTERN = /(\[中国翻訳\]|\[DL版\]|\[無修正\])/gu;
 
 export function splitTitleTags(value) {
   return String(value ?? "")
@@ -50,7 +50,14 @@ export function splitTitleTags(value) {
     .filter(Boolean)
     .map((text) => ({
       text,
-      kind: text === "[中国翻訳]" ? "translation" : text === "[DL版]" ? "dl" : null
+      kind:
+        text === "[中国翻訳]"
+          ? "translation"
+          : text === "[DL版]"
+            ? "dl"
+            : text === "[無修正]"
+              ? "uncensored"
+              : null
     }));
 }
 
