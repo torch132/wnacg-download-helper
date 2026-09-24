@@ -4,16 +4,24 @@ import { test } from "node:test";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("manifest 使用最小权限并通过 action popup 打开管理界面", async () => {
+test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.4.9");
-  assert.deepEqual(manifest.permissions, ["storage", "activeTab", "scripting", "downloads"]);
+  assert.equal(manifest.version, "1.5.0");
+  assert.equal(manifest.minimum_chrome_version, "116");
+  assert.deepEqual(manifest.permissions, [
+    "storage",
+    "activeTab",
+    "scripting",
+    "downloads",
+    "sidePanel",
+  ]);
   assert.deepEqual(manifest.host_permissions, [
     "https://www.wnacg.com/*",
     "https://*.wn01.download/*",
   ]);
-  assert.equal(manifest.action.default_popup, "app.html");
+  assert.equal(manifest.action.default_popup, undefined);
+  assert.deepEqual(manifest.side_panel, { default_path: "app.html" });
   assert.deepEqual(manifest.action.default_icon, {
     16: "icons/icon-16.png",
     32: "icons/icon-32.png",
@@ -53,12 +61,14 @@ test("扩展图标使用有效的 wnACG favicon PNG 尺寸", async () => {
   }
 });
 
-test("弹窗从当前活动 wnACG 列表页提取可见章节", async () => {
+test("侧栏从当前活动 wnACG 列表页提取可见章节", async () => {
   const app = await read("app.js");
   assert.match(app, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/);
   assert.match(app, /chrome\.scripting\.executeScript/);
   assert.match(app, /document\.querySelectorAll\("\.gallary_item"\)/);
   assert.match(app, /importCurrentPageMatches/);
+  assert.match(app, /async function refreshCurrentPageSnapshot\(\)/);
+  assert.doesNotMatch(app, /请保持弹窗打开/);
 });
 
 test("标签系列页跨页导入且最多扫描 15 页", async () => {
@@ -71,11 +81,16 @@ test("标签系列页跨页导入且最多扫描 15 页", async () => {
   assert.match(app, /await importCurrentTagPages\(\[watch\]\)/);
 });
 
-test("弹窗使用固定宽度和受控高度，不依赖新标签页", async () => {
-  const css = await read("styles.css");
-  assert.match(css, /html\s*\{[^}]*width:\s*760px;/s);
-  assert.match(css, /body\s*\{[^}]*height:\s*600px;/s);
+test("侧栏使用全宽全高响应式布局，不依赖新标签页", async () => {
+  const [css, background] = await Promise.all([read("styles.css"), read("background.js")]);
+  assert.match(css, /html\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;/s);
+  assert.match(css, /body\s*\{[^}]*width:\s*100%;[^}]*min-height:\s*100vh;/s);
   assert.match(css, /body\s*\{[^}]*overflow-y:\s*auto;/s);
+  assert.doesNotMatch(css, /min-width:\s*760px/);
+  assert.match(css, /@media \(max-width:\s*650px\)/);
+  assert.match(css, /@media \(max-width:\s*400px\)/);
+  assert.match(css, /#download-selected-btn\s*\{[^}]*grid-column:\s*1 \/ -1;/s);
+  assert.match(background, /chrome\.sidePanel\.setPanelBehavior\(\{ openPanelOnActionClick: true \}\)/);
   const files = await Promise.allSettled([read("service-worker.js")]);
   assert.equal(files[0].status, "rejected");
 });
@@ -158,7 +173,7 @@ test("列表页下载图标注入日期区域并通过后台保存到漫画目�
   assert.match(background, /mutateAppState/);
 });
 
-test("弹窗使用相同的莫兰迪红绿高亮标题标签", async () => {
+test("侧栏使用相同的莫兰迪红绿高亮标题标签", async () => {
   const [app, css] = await Promise.all([read("app.js"), read("styles.css")]);
   assert.match(app, /appendHighlightedTitle\(titleLink, record\.title\)/);
   assert.match(app, /document\.createTextNode\(part\.text\)/);

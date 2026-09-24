@@ -26,17 +26,17 @@
 }
 
 html {
-  width: 760px;
-  min-width: 760px;
-  height: 600px;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
   background: #edf0ed;
 }
 
 body {
   margin: 0;
-  width: 760px;
-  height: 600px;
-  min-height: 0;
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
   overflow-x: hidden;
   overflow-y: auto;
   background:
@@ -63,6 +63,7 @@ input:focus-visible {
 
 .app-shell {
   width: 100%;
+  min-height: 100vh;
   margin: 0;
   background: var(--surface);
   border: 0;
@@ -1134,6 +1135,35 @@ input[type="checkbox"] {
   }
 
   .activity-message {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 400px) {
+  .directory-control {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .directory-summary,
+  .directory-control .button,
+  .input-action-row .button {
+    width: 100%;
+  }
+
+  .directory-path {
+    max-width: none;
+  }
+
+  .input-action-row {
+    flex-direction: column;
+  }
+
+  .batch-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #download-selected-btn {
     grid-column: 1 / -1;
   }
 }

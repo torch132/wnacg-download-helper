@@ -48,7 +48,7 @@ async function init() {
     if (record.status !== UPDATE_STATUS.DOWNLOADING) return record;
     recovered += 1;
     return transitionUpdate(record, UPDATE_STATUS.FAILED, {
-      error: "上次下载被页面关闭或浏览器中断，请重试。"
+      error: "上次下载因侧栏关闭或浏览器中断，请重试。"
     });
   });
   if (recovered > 0) {
@@ -58,7 +58,7 @@ async function init() {
 
   [directoryHandle, currentPageSnapshot] = await Promise.all([
     getDirectoryHandle().catch(() => null),
-    readCurrentPageSnapshot().catch(() => null)
+    refreshCurrentPageSnapshot()
   ]);
   const imported = importCurrentPageMatches(state.watches);
   if (imported.length > 0) {
@@ -111,6 +111,11 @@ async function readCurrentPageSnapshot() {
   });
   const snapshot = execution?.result;
   return snapshot?.albums?.length ? snapshot : null;
+}
+
+async function refreshCurrentPageSnapshot() {
+  currentPageSnapshot = await readCurrentPageSnapshot().catch(() => null);
+  return currentPageSnapshot;
 }
 
 function importCurrentPageMatches(watches) {
@@ -341,6 +346,7 @@ async function handleWatchSubmit(event) {
 
   setBusy(true, "正在建立关注基线…");
   try {
+    await refreshCurrentPageSnapshot();
     const baseline = await findBaseline(prefix);
     const id = editingWatchId || crypto.randomUUID();
     const previous = state.watches.find((watch) => watch.id === editingWatchId);
@@ -500,6 +506,7 @@ async function scanForUpdates() {
   let totalAdded = 0;
 
   try {
+    await refreshCurrentPageSnapshot();
     const tagImport = await importCurrentTagPages(watches);
     tagPagesScanned = tagImport.pagesScanned;
     totalAdded += tagImport.added.length;
@@ -925,7 +932,7 @@ function setBusy(value, message = "") {
   busy = value;
   document.body.toggleAttribute("data-busy", value);
   if (elements["scan-status"] && message) {
-    elements["scan-status"].textContent = `${message} · 请保持弹窗打开`;
+    elements["scan-status"].textContent = `${message} · 侧栏任务进行中`;
   }
   if (!value && elements["scan-progress"]) {
     setProgressVisual(0, MAX_SCAN_PAGES, "尚未开始", `0 / ${MAX_SCAN_PAGES} 页`);
@@ -937,7 +944,7 @@ function setBusy(value, message = "") {
 function setScanProgress(current, total, message) {
   setProgressVisual(current, total, message, `${current} / ${total} 页`);
   if (elements["scan-status"]) {
-    elements["scan-status"].textContent = `${message} · ${current}/${total} · 请保持弹窗打开`;
+    elements["scan-status"].textContent = `${message} · ${current}/${total} · 侧栏任务进行中`;
   }
 }
 
@@ -952,7 +959,7 @@ function setDownloadProgress(index, totalFiles, title, written, totalBytes) {
   if (elements["scan-status"]) {
     elements["scan-status"].textContent = `下载 ${index + 1}/${totalFiles}：${title}${
       progress === null ? (written ? ` · ${formatBytes(written)}` : "") : ` · ${progress}%`
-    } · 请保持弹窗打开`;
+    } · 侧栏任务进行中`;
   }
 }
 

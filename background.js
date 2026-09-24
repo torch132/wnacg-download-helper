@@ -29,6 +29,15 @@ let activeWriteQueue = Promise.resolve();
 let filenamePathsWriteQueue = Promise.resolve();
 let recoveryPromise = null;
 
+async function configureSidePanel() {
+  if (!chrome.sidePanel?.setPanelBehavior) return;
+  try {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  } catch (error) {
+    console.warn("wnACG 侧栏入口配置失败", error);
+  }
+}
+
 async function loadFilenamePaths() {
   try {
     const stored = await chrome.storage.session.get(FILENAME_PATHS_KEY);
@@ -679,3 +688,5 @@ chrome.downloads.onChanged.addListener((delta) => {
 void ensureRecovery().catch((error) => {
   console.error("wnACG 一键下载恢复失败", error);
 });
+
+void configureSidePanel();

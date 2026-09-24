@@ -41,6 +41,7 @@ function createEnvironment({
   const downloads = new Map(initialDownloads);
   const downloadOptions = [];
   const fetchUrls = [];
+  const sidePanelCalls = [];
 
   globalThis.chrome = {
     storage: {
@@ -62,6 +63,11 @@ function createEnvironment({
         addListener(listener) {
           messageListener = listener;
         }
+      }
+    },
+    sidePanel: {
+      async setPanelBehavior(options) {
+        sidePanelCalls.push(structuredClone(options));
       }
     },
     downloads: {
@@ -137,6 +143,7 @@ function createEnvironment({
     downloadOptions,
     fetchUrls,
     sentMessages,
+    sidePanelCalls,
     get downloadCalls() {
       return downloadCalls;
     },
@@ -207,6 +214,7 @@ test("同一 aid 的并发点击只创建一次下载并通知全部标签", asy
   const [firstResult, secondResult] = await Promise.all([first, second]);
 
   assert.equal(env.downloadCalls, 1);
+  assert.deepEqual(env.sidePanelCalls, [{ openPanelOnActionClick: true }]);
   assert.deepEqual(env.fetchUrls, [
     "https://www.wnacg.com/download-index-aid-386225.html"
   ]);
