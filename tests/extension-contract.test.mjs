@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.1");
+  assert.equal(manifest.version, "1.5.2");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -99,6 +99,7 @@ test("侧栏使用全宽全高响应式布局，不依赖新标签页", async ()
 
 test("管理页提供所有运行时控件且不加载远程资源", async () => {
   const html = await read("app.html");
+  assert.match(html, /<meta name="color-scheme" content="light dark">/);
   const requiredIds = [
     "choose-directory-btn",
     "watch-form",
@@ -120,6 +121,26 @@ test("管理页提供所有运行时控件且不加载远程资源", async () =>
   }
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]+(?:src|href)=["']https?:/i);
   assert.match(html, /<script type="module" src="app\.js"><\/script>/);
+});
+
+test("界面使用 Catppuccin Latte 和 Mocha 自动亮暗主题", async () => {
+  const [css, contentCss] = await Promise.all([
+    read("styles.css"),
+    read("content-script.css"),
+  ]);
+  assert.match(css, /--surface:\s*#eff1f5;/);
+  assert.match(css, /--ink:\s*#4c4f69;/);
+  assert.match(
+    css,
+    /@media \(prefers-color-scheme: dark\)[\s\S]*color-scheme:\s*dark;[\s\S]*--surface:\s*#1e1e2e;[\s\S]*--ink:\s*#cdd6f4;/,
+  );
+  assert.match(contentCss, /--wnacg-helper-primary:\s*#8839ef;/);
+  assert.match(
+    contentCss,
+    /@media \(prefers-color-scheme: dark\)[\s\S]*--wnacg-helper-primary:\s*#cba6f7;/,
+  );
+  assert.doesNotMatch(css, /#18211d|#edf0ed|#1f5140|#d1782c/iu);
+  assert.doesNotMatch(contentCss, /#b95f1f|#d1782c|#26332d/iu);
 });
 
 test("所有静态 DOM id 唯一", async () => {
