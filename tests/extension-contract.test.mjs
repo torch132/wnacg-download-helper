@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.0");
+  assert.equal(manifest.version, "1.5.1");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -67,6 +67,8 @@ test("侧栏从当前活动 wnACG 列表页提取可见章节", async () => {
   assert.match(app, /chrome\.scripting\.executeScript/);
   assert.match(app, /document\.querySelectorAll\("\.gallary_item"\)/);
   assert.match(app, /importCurrentPageMatches/);
+  assert.match(app, /expandMatchedCollections/);
+  assert.match(app, /parseCollectionChapterPage/);
   assert.match(app, /async function refreshCurrentPageSnapshot\(\)/);
   assert.doesNotMatch(app, /请保持弹窗打开/);
 });
@@ -157,7 +159,7 @@ test("列表页下载图标注入日期区域并通过后台保存到漫画目�
   assert.match(css, /\.wnacg-helper-title-token\.is-dl\s*\{[^}]*#a8e6cf;[^}]*#24483d;/s);
   assert.match(css, /\.wnacg-helper-title-token\.is-uncensored\s*\{[^}]*#6a9cbb;/s);
   assert.match(css, /vertical-align:\s*middle/);
-  assert.match(background, /parseDownloadPageText/);
+  assert.match(background, /parseDownloadItemsText/);
   assert.match(background, /parseDownloadTitleText/);
   assert.doesNotMatch(background, /probeZip/);
   assert.match(background, /chrome\.downloads\.onDeterminingFilename/);
@@ -171,6 +173,7 @@ test("列表页下载图标注入日期区域并通过后台保存到漫画目�
   assert.match(background, /chrome\.downloads\.removeFile/);
   assert.match(background, /state\.quickDownloads/);
   assert.match(background, /mutateAppState/);
+  assert.match(content, /isCollection/);
 });
 
 test("侧栏使用相同的莫兰迪红绿高亮标题标签", async () => {

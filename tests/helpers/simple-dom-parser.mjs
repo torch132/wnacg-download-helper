@@ -52,6 +52,20 @@ class SimpleAlbumNode {
   querySelector() {
     return anchorNodes(this.html)[0] ?? null;
   }
+
+  querySelectorAll(selector) {
+    if (selector !== ".sr_ctag") return [];
+    const nodes = [];
+    const pattern = /<span\b([^>]*)>/gi;
+    for (const match of this.html.matchAll(pattern)) {
+      const tag = `<span${match[1]}>`;
+      const classes = (attributesFrom(tag).get("class") || "").split(/\s+/);
+      if (!classes.includes("sr_ctag")) continue;
+      const content = this.html.slice(match.index + match[0].length).match(/^([\s\S]*?)<\/span>/i)?.[1] || "";
+      nodes.push({ textContent: decodeEntities(content.replace(/<[^>]*>/g, " ")).trim() });
+    }
+    return nodes;
+  }
 }
 
 class SimpleDocument {

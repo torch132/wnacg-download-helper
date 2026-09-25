@@ -63,11 +63,25 @@ test("parseAlbumListHtml 从真实页面结构提取并按 aid 去重", async ()
         aid: "384588",
         title: "為民服務App 25-26話",
         url: "https://www.wnacg.com/photos-index-aid-384588.html",
+        isCollection: false,
       },
       {
         aid: "384585",
         title: "獵艷管理員 55-56話",
         url: "https://www.wnacg.com/photos-index-aid-384585.html",
+        isCollection: false,
+      },
+      {
+        aid: "388288",
+        title: "朋友的媽媽 外傳",
+        url: "https://www.wnacg.com/photos-index-aid-388288.html",
+        isCollection: true,
+      },
+      {
+        aid: "388289",
+        title: "普通完結漫畫",
+        url: "https://www.wnacg.com/photos-index-aid-388289.html",
+        isCollection: false,
       },
     ],
   );
@@ -121,6 +135,135 @@ test("parseDownloadPageHtml 拒绝仅含不可信链接的页面", () => {
         { parserCtor: SimpleDOMParser },
       ),
     /未包含受信任/,
+  );
+});
+
+test("parseDownloadItemsText 保持普通下载页兼容并生成稳定身份", async () => {
+  const html = await fixture("download.html");
+  const result = core.parseDownloadItemsText(html, {
+    sourceAid: "384585",
+    sourceTitle: "獵艷管理員 55-56話",
+    pageUrl: "https://www.wnacg.com/download-index-aid-384585.html",
+  });
+  assert.equal(result.kind, "single");
+  assert.equal(result.isCollection, false);
+  assert.deepEqual(result.items, [{
+    recordKey: "album:384585",
+    aid: "384585",
+    sourceAid: "384585",
+    downloadAid: "384585",
+    title: "獵艷管理員 55-56話",
+    downloadPageUrl: "https://www.wnacg.com/download-index-aid-384585.html",
+    zipUrl: "https://dl1.wn01.download/down/9999/0123456789abcdef0123456789abcdef.zip?n=%E6%B8%AC%E8%A9%A6%E6%BC%AB%E7%95%AB",
+    isCollection: false,
+  }]);
+  assert.equal(core.parseDownloadPageText(html), result.items[0].zipUrl);
+});
+
+test("parseDownloadItemsText 将合集父 aid 展开为可信 ZIP 子章节", async () => {
+  const html = await fixture("download-collection.html");
+  const result = core.parseDownloadItemsText(html);
+  assert.deepEqual(
+    {
+      kind: result.kind,
+      isCollection: result.isCollection,
+      sourceAid: result.sourceAid,
+      seriesId: result.seriesId,
+      total: result.total,
+      limit: result.limit,
+      page: result.page,
+    },
+    {
+      kind: "collection",
+      isCollection: true,
+      sourceAid: "388288",
+      seriesId: "388288",
+      total: 5,
+      limit: 30,
+      page: 1,
+    },
+  );
+  assert.deepEqual(result.items, [
+    {
+      recordKey: "bundle:388288:213231",
+      aid: "213231",
+      sourceAid: "388288",
+      downloadAid: "213231",
+      title: "朋友的媽媽 外傳1-3話",
+      downloadPageUrl: "https://www.wnacg.com/download-index-aid-213231.html?s=388288",
+      zipUrl: "https://dl1.wn01.download/down/213231/a.zip?n=a",
+      isCollection: true,
+    },
+    {
+      recordKey: "bundle:388288:215244",
+      aid: "215244",
+      sourceAid: "388288",
+      downloadAid: "215244",
+      title: "朋友的媽媽 外傳4-5話",
+      downloadPageUrl: "https://www.wnacg.com/download-index-aid-215244.html?s=388288",
+      zipUrl: "https://dl2.wn01.download/down/215244/b.zip?n=b&x=1",
+      isCollection: true,
+    },
+  ]);
+});
+
+test("parseDownloadItemsText 不把完结状态误判为合集", () => {
+  const html = '<title>普通完結漫畫.zip 下載 - 紳士漫畫</title><a class="ads" href="//dl1.wn01.download/normal.zip">下載</a><span class="sr_stag end">完結</span>';
+  const result = core.parseDownloadItemsText(html, { sourceAid: "388289" });
+  assert.equal(result.kind, "single");
+  assert.equal(result.items[0].recordKey, "album:388289");
+});
+
+test("合集 HTML 与分页 JSON 都拒绝不可信或非 ZIP 链接", async () => {
+  const html = (await fixture("download-collection.html"))
+    .replace("https://dl2.wn01.download/down/215244/b.zip", "https://evil.test/b.zip");
+  assert.throws(() => core.parseDownloadItemsText(html), /未包含受信任/);
+  assert.throws(
+    () => core.parseCollectionChapterPage({
+      code: 0,
+      list: [{ id: 1, name: "章节", dl2: "https://dl1.wn01.download/file.exe" }],
+    }, { sourceAid: "388288" }),
+    /未包含受信任/,
+  );
+});
+
+test("parseCollectionChapterPage 解析超过首屏的合集章节分页", () => {
+  const result = core.parseCollectionChapterPage(JSON.stringify({
+    code: 0,
+    list: [
+      {
+        id: 300031,
+        idx: 31,
+        name: "第31話 朋友的媽媽 外傳61-62話",
+        pages: 42,
+        key: "down/300031/c.zip",
+        dl2: "//dl3.wn01.download/down/300031/c.zip?n=c&amp;x=1",
+      },
+    ],
+    total: 35,
+    page: 2,
+    limit: 30,
+  }), { sourceAid: "388288" });
+
+  assert.equal(result.page, 2);
+  assert.equal(result.total, 35);
+  assert.deepEqual(result.items[0], {
+    recordKey: "bundle:388288:300031",
+    aid: "300031",
+    sourceAid: "388288",
+    downloadAid: "300031",
+    title: "朋友的媽媽 外傳61-62話",
+    downloadPageUrl: "https://www.wnacg.com/download-index-aid-300031.html?s=388288",
+    zipUrl: "https://dl3.wn01.download/down/300031/c.zip?n=c&x=1",
+    isCollection: true,
+  });
+  assert.deepEqual(
+    core.parseCollectionChapterPage({ code: 0, list: [], total: 35, page: 3, limit: 30 }, { sourceAid: "388288" }).items,
+    [],
+  );
+  assert.throws(
+    () => core.parseCollectionChapterPage("not-json", { sourceAid: "388288" }),
+    /不是有效 JSON/,
   );
 });
 
@@ -204,21 +347,78 @@ test("createUpdateCandidates 按 aid 去重、最长前缀归属并初始化 pen
     detectedAt,
   });
 
-  assert.equal(result.records[0], existing[0]);
+  assert.deepEqual(result.records[0], {
+    aid: "100",
+    status: "downloaded",
+    title: "漫畫 特別篇",
+    sourceUrl: "old",
+    downloadPageUrl: undefined,
+    zipUrl: null,
+  });
   assert.deepEqual(result.added, [
     {
       aid: "101",
+      recordKey: "album:101",
+      sourceAid: "101",
+      downloadAid: "101",
+      isCollection: false,
       watchId: "special",
       comicName: "漫畫 特別篇",
       title: "漫畫 特別篇 2",
       sourceUrl: "new",
       downloadPageUrl: "https://www.wnacg.com/download-index-aid-101.html",
+      zipUrl: null,
       status: "pending",
       selected: true,
       detectedAt,
       error: null,
     },
   ]);
+});
+
+test("合集子章节按父子 recordKey 去重，并允许父 aid 等于基线时发现新增话", () => {
+  const watch = {
+    id: "collection",
+    prefix: "朋友的媽媽 外傳",
+    baselineAid: "388288",
+    collectionBaselineAid: "213231",
+    enabled: true,
+  };
+  const albums = [
+    {
+      aid: "213231",
+      sourceAid: "388288",
+      downloadAid: "213231",
+      recordKey: "bundle:388288:213231",
+      title: "朋友的媽媽 外傳1-3話",
+      isCollection: true,
+      zipUrl: "https://dl1.wn01.download/a.zip",
+    },
+    {
+      aid: "300031",
+      sourceAid: "388288",
+      downloadAid: "300031",
+      recordKey: "bundle:388288:300031",
+      title: "朋友的媽媽 外傳12-13話",
+      isCollection: true,
+      zipUrl: "https://dl1.wn01.download/b.zip",
+    },
+  ];
+  const eligible = core.filterAlbumsAfterBaselines(albums, [watch]);
+  assert.deepEqual(eligible.map((item) => item.downloadAid), ["300031"]);
+  const result = core.createUpdateCandidates({
+    albums: eligible,
+    watchItems: [watch],
+    existingRecords: [{
+      aid: "213231",
+      recordKey: "bundle:388288:213231",
+      status: "downloaded",
+    }],
+  });
+  assert.deepEqual(result.added.map((item) => item.recordKey), [
+    "bundle:388288:300031",
+  ]);
+  assert.equal(result.added[0].zipUrl, "https://dl1.wn01.download/b.zip");
 });
 
 test("transitionUpdate 强制合法状态流并维护选择/错误状态", () => {
@@ -274,8 +474,13 @@ test("基线过滤使用最长前缀，并在页面越过 aid 边界后停止", 
   ];
 
   assert.deepEqual(core.filterAlbumsAfterBaselines(albums, watches), [albums[0], albums[1]]);
+  assert.deepEqual([...core.findReachedBaselineIds(albums, watches)], []);
   assert.deepEqual(
-    [...core.findReachedBaselineIds(albums, watches)].sort(),
+    [...core.findReachedBaselineIds([
+      ...albums,
+      { aid: "105", title: "漫画 5話" },
+      { aid: "108", title: "漫画 特别篇 8話" },
+    ], watches)].sort(),
     ["general", "special"],
   );
 });

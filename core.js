@@ -185,8 +185,11 @@ export function parseAlbumListHtml(
     const url = absoluteUrl(href, baseUrl);
     if (!aid || !title || !url || seenAids.has(aid)) continue;
 
+    const isCollection = [...item.querySelectorAll(".sr_ctag")]
+      .some((node) => String(node.textContent || "").trim() === "合集");
+
     seenAids.add(aid);
-    albums.push({ aid, title, url });
+    albums.push({ aid, title, url, isCollection });
   }
 
   if (albums.length === 0) {
@@ -298,6 +301,249 @@ export function parseDownloadPageHtml(
   );
 }
 
+function textFromHtml(value) {
+  return decodeHtmlAttribute(String(value ?? "").replace(/<[^>]*>/gu, " "))
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function classNamesFromTag(tag) {
+  return (quotedAttribute(tag, "class") || "").split(/\s+/u).filter(Boolean);
+}
+
+function firstTagWithClass(html, tagName, className) {
+  const pattern = new RegExp(`<${tagName}\\b[^>]*>`, "gi");
+  for (const match of String(html ?? "").matchAll(pattern)) {
+    if (classNamesFromTag(match[0]).includes(className)) return match[0];
+  }
+  return null;
+}
+
+function firstElementTextWithClass(html, tagName, className) {
+  const pattern = new RegExp(
+    `<${tagName}\\b([^>]*)>([\\s\\S]*?)<\\/${tagName}>`,
+    "gi",
+  );
+  for (const match of String(html ?? "").matchAll(pattern)) {
+    const tag = `<${tagName}${match[1]}>`;
+    if (classNamesFromTag(tag).includes(className)) return textFromHtml(match[2]);
+  }
+  return null;
+}
+
+function collectionRowFragments(html) {
+  const source = String(html ?? "");
+  const starts = [];
+  for (const match of source.matchAll(/<div\b[^>]*>/gi)) {
+    if (classNamesFromTag(match[0]).includes("ch-row")) starts.push(match.index);
+  }
+  return starts.map((start, index) =>
+    source.slice(start, starts[index + 1] ?? source.length),
+  );
+}
+
+function buildDownloadItem({ sourceAid, downloadAid, title, downloadPageUrl, zipUrl, isCollection }) {
+  const source = String(sourceAid ?? "").trim();
+  const download = String(downloadAid ?? "").trim();
+  if (!source || !download) {
+    throw new WnacgParseError("下载项目缺少有效 aid。");
+  }
+  return {
+    recordKey: isCollection
+      ? `bundle:${source}:${download}`
+      : `album:${download}`,
+    aid: download,
+    sourceAid: source,
+    downloadAid: download,
+    title: String(title ?? "").trim(),
+    downloadPageUrl,
+    zipUrl,
+    isCollection: Boolean(isCollection),
+  };
+}
+
+function parseCollectionRow(row, options) {
+  const { sourceAid, baseUrl, allowedHost } = options;
+  const infoTag = firstTagWithClass(row, "a", "ch-info");
+  const downloadTag = firstTagWithClass(row, "a", "ch-dl2");
+  const infoHref = infoTag ? quotedAttribute(infoTag, "href") : null;
+  const downloadAid = extractAid(infoHref);
+  const downloadPageUrl = infoHref ? absoluteUrl(infoHref, baseUrl) : null;
+  const rawTitle =
+    firstElementTextWithClass(row, "span", "ch-name") ||
+    textFromHtml(infoTag ? quotedAttribute(infoTag, "title") : "");
+  const title = rawTitle.replace(/^第\s*\d+\s*話\s*/u, "").trim();
+  const href = downloadTag ? quotedAttribute(downloadTag, "href") : null;
+  const zipUrl = href ? absoluteUrl(href, baseUrl) : null;
+
+  let childPage;
+  try {
+    childPage = new URL(downloadPageUrl);
+  } catch {
+    childPage = null;
+  }
+  if (
+    !downloadAid ||
+    !downloadPageUrl ||
+    !title ||
+    childPage?.origin !== WNACG_ORIGIN ||
+    childPage.searchParams.get("s") !== String(sourceAid)
+  ) {
+    throw new WnacgParseError("合集章节缺少有效的 aid、标题或下载页链接。");
+  }
+  if (!zipUrl || !isAllowedDownloadUrl(zipUrl, { allowedHost })) {
+    throw new WnacgParseError(`合集章节 ${downloadAid} 未包含受信任的 HTTPS ZIP 链接。`);
+  }
+  return buildDownloadItem({
+    sourceAid,
+    downloadAid,
+    title,
+    downloadPageUrl,
+    zipUrl,
+    isCollection: true,
+  });
+}
+
+/**
+ * 将普通下载页和合集下载页统一解析为下载清单。
+ * 普通页仍使用原有 a.ads 规则；只有 #ch-wrap/.ch-row 会进入合集分支。
+ */
+export function parseDownloadItemsText(
+  html,
+  {
+    sourceAid,
+    sourceTitle = "",
+    pageUrl,
+    baseUrl = WNACG_ORIGIN,
+    allowedHost = DEFAULT_DOWNLOAD_HOST,
+  } = {},
+) {
+  const source = String(html ?? "");
+  const wrapTag = [...source.matchAll(/<div\b[^>]*>/gi)]
+    .map((match) => match[0])
+    .find((tag) => quotedAttribute(tag, "id") === "ch-wrap");
+
+  if (wrapTag) {
+    const declaredSeriesId = String(quotedAttribute(wrapTag, "data-sid") || "").trim();
+    const requestedSeriesId = String(sourceAid || "").trim();
+    if (requestedSeriesId && declaredSeriesId && requestedSeriesId !== declaredSeriesId) {
+      throw new WnacgParseError("合集下载页的父 aid 与请求不一致。");
+    }
+    const seriesId = requestedSeriesId || declaredSeriesId;
+    if (!seriesId) throw new WnacgParseError("合集下载页缺少 data-sid。");
+    const rows = collectionRowFragments(source);
+    const items = rows.map((row) =>
+      parseCollectionRow(row, { sourceAid: seriesId, baseUrl, allowedHost }),
+    );
+    const uniqueItems = [];
+    const seen = new Set();
+    for (const item of items) {
+      if (seen.has(item.recordKey)) continue;
+      seen.add(item.recordKey);
+      uniqueItems.push(item);
+    }
+    const total = Number(quotedAttribute(wrapTag, "data-total")) || uniqueItems.length;
+    if (uniqueItems.length > total) {
+      throw new WnacgParseError("合集下载页的章节总数与列表不一致。");
+    }
+    return {
+      kind: "collection",
+      isCollection: true,
+      sourceAid: seriesId,
+      seriesId,
+      total,
+      limit: Number(quotedAttribute(wrapTag, "data-limit")) || 30,
+      page: 1,
+      items: uniqueItems,
+    };
+  }
+
+  const aid = String(sourceAid || extractAid(pageUrl) || "").trim();
+  if (!aid) throw new WnacgParseError("普通下载页缺少有效 aid。");
+  const zipUrl = parseDownloadPageText(source, { baseUrl, allowedHost });
+  const title = String(sourceTitle || parseDownloadTitleText(source) || `aid-${aid}`).trim();
+  const downloadPageUrl = pageUrl
+    ? absoluteUrl(pageUrl, baseUrl)
+    : `${WNACG_ORIGIN}/download-index-aid-${aid}.html`;
+  return {
+    kind: "single",
+    isCollection: false,
+    sourceAid: aid,
+    seriesId: null,
+    total: 1,
+    limit: 1,
+    page: 1,
+    items: [buildDownloadItem({
+      sourceAid: aid,
+      downloadAid: aid,
+      title,
+      downloadPageUrl,
+      zipUrl,
+      isCollection: false,
+    })],
+  };
+}
+
+/** 解析合集章节分页接口的 JSON 响应。 */
+export function parseCollectionChapterPage(
+  payload,
+  {
+    sourceAid,
+    baseUrl = WNACG_ORIGIN,
+    allowedHost = DEFAULT_DOWNLOAD_HOST,
+  } = {},
+) {
+  let data = payload;
+  if (typeof payload === "string") {
+    try {
+      data = JSON.parse(payload);
+    } catch {
+      throw new WnacgParseError("合集章节分页响应不是有效 JSON。");
+    }
+  }
+  if (!data || typeof data !== "object" || data.code !== 0 || !Array.isArray(data.list)) {
+    throw new WnacgParseError("合集章节分页响应格式无效。");
+  }
+  const seriesId = String(sourceAid ?? data.sid ?? "").trim();
+  if (!seriesId) throw new WnacgParseError("合集章节分页响应缺少父 aid。");
+  if (sourceAid && data.sid && String(sourceAid) !== String(data.sid)) {
+    throw new WnacgParseError("合集章节分页响应的父 aid 与请求不一致。");
+  }
+
+  const items = data.list.map((entry) => {
+    const downloadAid = String(entry?.id ?? entry?.aid ?? "").trim();
+    const title = String(entry?.name ?? "").trim()
+      .replace(/^第\s*\d+\s*話\s*/u, "")
+      .trim();
+    const zipUrl = absoluteUrl(decodeHtmlAttribute(entry?.dl2 || ""), baseUrl);
+    if (!downloadAid || !title) {
+      throw new WnacgParseError("合集章节分页项目缺少有效的 aid 或标题。");
+    }
+    if (!zipUrl || !isAllowedDownloadUrl(zipUrl, { allowedHost })) {
+      throw new WnacgParseError(`合集章节 ${downloadAid} 未包含受信任的 HTTPS ZIP 链接。`);
+    }
+    return buildDownloadItem({
+      sourceAid: seriesId,
+      downloadAid,
+      title,
+      downloadPageUrl: `${WNACG_ORIGIN}/download-index-aid-${downloadAid}.html?s=${seriesId}`,
+      zipUrl,
+      isCollection: true,
+    });
+  });
+
+  return {
+    kind: "collection",
+    isCollection: true,
+    sourceAid: seriesId,
+    seriesId,
+    total: Number(data.total) || items.length,
+    limit: Number(data.limit) || 30,
+    page: Number(data.page) || 1,
+    items,
+  };
+}
+
 export function sanitizeFileName(value, fallback = "untitled") {
   const clean = (input) => String(input ?? "")
     .normalize("NFKC")
@@ -387,28 +633,53 @@ export function createUpdateCandidates({
   existingRecords = [],
   detectedAt = new Date().toISOString(),
 } = {}) {
-  const existingAids = new Set(
-    existingRecords.map((record) => String(record?.aid ?? "")),
+  const records = existingRecords.map((record) => ({ ...record }));
+  const existingByKey = new Map(
+    records.map((record, index) => [
+      String(record?.recordKey || `album:${record?.aid ?? ""}`),
+      index,
+    ]),
   );
-  const addedAids = new Set();
+  const addedKeys = new Set();
   const added = [];
 
   for (const album of albums) {
     const aid = String(album?.aid ?? extractAid(album?.url) ?? "");
-    if (!aid || existingAids.has(aid) || addedAids.has(aid)) continue;
+    const recordKey = String(album?.recordKey || `album:${aid}`);
+    if (!aid || addedKeys.has(recordKey)) continue;
 
-    const watchItem = findLongestPrefixMatch(album?.title, watchItems);
+    const watchItem =
+      watchItems.find((item) => item?.id && item.id === album?.watchId) ||
+      findLongestPrefixMatch(album?.title, watchItems);
     if (!watchItem) continue;
 
-    addedAids.add(aid);
+    if (existingByKey.has(recordKey)) {
+      const index = existingByKey.get(recordKey);
+      records[index] = {
+        ...records[index],
+        title: String(album.title ?? records[index].title ?? "").trim(),
+        sourceUrl: album.url || album.sourceUrl || records[index].sourceUrl,
+        downloadPageUrl: album.downloadPageUrl || records[index].downloadPageUrl,
+        zipUrl: album.zipUrl || records[index].zipUrl || null,
+      };
+      continue;
+    }
+
+    addedKeys.add(recordKey);
     added.push({
       aid,
+      recordKey,
+      sourceAid: String(album?.sourceAid || aid),
+      downloadAid: String(album?.downloadAid || aid),
+      isCollection: Boolean(album?.isCollection),
       watchId: watchItem.id ?? null,
       comicName: comicNameFor(watchItem),
       title: String(album.title ?? "").trim(),
       sourceUrl:
         album.url || `${WNACG_ORIGIN}/photos-index-aid-${aid}.html`,
-      downloadPageUrl: `${WNACG_ORIGIN}/download-index-aid-${aid}.html`,
+      downloadPageUrl:
+        album.downloadPageUrl || `${WNACG_ORIGIN}/download-index-aid-${aid}.html`,
+      zipUrl: album.zipUrl || null,
       status: UPDATE_STATUS.PENDING,
       selected: true,
       detectedAt,
@@ -417,7 +688,7 @@ export function createUpdateCandidates({
   }
 
   return {
-    records: [...existingRecords, ...added],
+    records: [...records, ...added],
     added,
   };
 }
@@ -426,21 +697,31 @@ export function filterAlbumsAfterBaselines(albums = [], watchItems = []) {
   return albums.filter((album) => {
     const watchItem = findLongestPrefixMatch(album?.title, watchItems);
     if (!watchItem) return false;
-    const aid = Number(album?.aid ?? extractAid(album?.url));
+    const aid = Number(
+      album?.isCollection ? album?.sourceAid : album?.aid ?? extractAid(album?.url),
+    );
     const baselineAid = Number(watchItem?.baselineAid);
-    return Number.isFinite(aid) && Number.isFinite(baselineAid) && aid > baselineAid;
+    if (!Number.isFinite(aid) || !Number.isFinite(baselineAid)) return false;
+    if (!album?.isCollection) return aid > baselineAid;
+    if (aid !== baselineAid) return aid > baselineAid;
+    const childAid = Number(album?.downloadAid || album?.aid);
+    const childBaseline = Number(watchItem?.collectionBaselineAid);
+    return !Number.isFinite(childBaseline) || childAid > childBaseline;
   });
 }
 
 export function findReachedBaselineIds(albums = [], watchItems = []) {
-  const aids = albums.map((album) => Number(album?.aid)).filter(Number.isFinite);
-  if (aids.length === 0) return new Set();
-  const oldestAid = Math.min(...aids);
-  return new Set(
-    watchItems
-      .filter((watchItem) => Number(watchItem?.baselineAid) >= oldestAid)
-      .map((watchItem) => watchItem.id),
-  );
+  const reached = new Set();
+  for (const watchItem of watchItems) {
+    const baselineAid = Number(watchItem?.baselineAid);
+    if (!Number.isFinite(baselineAid)) continue;
+    const matchingAids = albums
+      .filter((album) => findLongestPrefixMatch(album?.title, [watchItem]) === watchItem)
+      .map((album) => Number(album?.sourceAid || album?.aid))
+      .filter(Number.isFinite);
+    if (matchingAids.some((aid) => aid <= baselineAid)) reached.add(watchItem.id);
+  }
+  return reached;
 }
 
 export function hasZipSignature(value) {

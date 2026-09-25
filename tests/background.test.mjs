@@ -14,13 +14,25 @@ function downloadPage(aid, title = `测试漫画 ${aid}話`) {
     <a class="ads" href="https://dl1.wn01.download/test-${aid}.zip">备用下载</a>`;
 }
 
+function collectionDownloadPage({ sourceAid, items, total = items.length, limit = 30 }) {
+  const rows = items.map((item, index) => `
+    <div class="ch-row" data-key="down/${item.aid}/${item.aid}.zip">
+      <a class="ch-info" href="/download-index-aid-${item.aid}.html?s=${sourceAid}" title="第${index + 1}話 ${item.title}">
+        <span class="ch-name">${item.title}</span>
+      </a>
+      <a class="ch-dl ch-dl2" href="https://dl1.wn01.download/down/${item.aid}/${item.aid}.zip?n=${item.aid}">下載地址二</a>
+    </div>`).join("");
+  return `<div id="ch-wrap" data-sid="${sourceAid}" data-total="${total}" data-limit="${limit}">${rows}</div>`;
+}
+
 function createEnvironment({
   localState,
   initialDownloads = new Map(),
   fetchGate,
   pageTitle,
   redirectUrl,
-  downloadError
+  downloadError,
+  collection
 } = {}) {
   let local = {
     wnacgStateV1: localState || {
@@ -128,11 +140,24 @@ function createEnvironment({
   globalThis.fetch = async (url) => {
     fetchUrls.push(String(url));
     const aid = String(url).match(/(\d+)(?:\.html|\.zip)$/u)?.[1] || "0";
+    if (String(url).includes("act=chapters")) {
+      const page = Number(new URL(String(url)).searchParams.get("page"));
+      const payload = collection?.pages?.[page] || {
+        code: 0,
+        list: [],
+        total: collection?.total || 0,
+        page,
+        limit: collection?.limit || 30
+      };
+      return { ok: true, text: async () => JSON.stringify(payload) };
+    }
     if (String(url).includes("download-index")) {
       if (fetchGate) await fetchGate.promise;
       return {
         ok: true,
-        text: async () => downloadPage(aid, pageTitle || `测试漫画 ${aid}話`)
+        text: async () => collection && aid === String(collection.sourceAid)
+          ? collectionDownloadPage(collection)
+          : downloadPage(aid, pageTitle || `测试漫画 ${aid}話`)
       };
     }
     throw new Error(`不应由 fetch 预请求 ZIP：${url}`);
@@ -157,11 +182,12 @@ function createEnvironment({
       aid,
       tabId,
       url = "https://www.wnacg.com/albums-index.html",
-      title = `测试漫画 ${aid}話`
+      title = `测试漫画 ${aid}話`,
+      isCollection = false
     ) {
       return new Promise((resolve) => {
         const keepAlive = messageListener(
-          { type: "WNACG_QUICK_DOWNLOAD", aid: String(aid), title },
+          { type: "WNACG_QUICK_DOWNLOAD", aid: String(aid), title, isCollection },
           { tab: { id: tabId, url } },
           resolve
         );
@@ -449,6 +475,73 @@ test("浏览器重启后从本地记录恢复并收敛已完成下载", async ()
     "/Users/tester/Downloads/测试漫画/测试漫画 386227話.zip");
 });
 
+test("浏览器重启后合集子任务独立恢复且父记录最终全部完成", async () => {
+  const sourceAid = "388292";
+  const firstId = 776;
+  const secondId = 777;
+  const records = [
+    {
+      aid: "230001",
+      downloadAid: "230001",
+      sourceAid,
+      recordKey: `bundle:${sourceAid}:230001`,
+      title: "恢复合集 1話",
+      comicName: "恢复合集",
+      isCollection: true,
+      collectionTotal: 2,
+      relativePath: "恢复合集/恢复合集 1話.zip",
+      actualFilePath: "/Users/tester/Downloads/恢复合集/恢复合集 1話.zip",
+      status: "downloaded",
+      downloadId: firstId
+    },
+    {
+      aid: "230002",
+      downloadAid: "230002",
+      sourceAid,
+      recordKey: `bundle:${sourceAid}:230002`,
+      title: "恢复合集 2話",
+      comicName: "恢复合集",
+      isCollection: true,
+      collectionTotal: 2,
+      relativePath: "恢复合集/恢复合集 2話.zip",
+      status: "downloading",
+      downloadId: secondId
+    }
+  ];
+  const initialDownloads = new Map(records.map((record) => [record.downloadId, {
+    id: record.downloadId,
+    state: "complete",
+    url: `https://dl1.wn01.download/${record.aid}.zip`,
+    finalUrl: `https://dl1.wn01.download/${record.aid}.zip`,
+    filename: `/Users/tester/Downloads/${record.relativePath}`,
+    mime: "application/zip",
+    fileSize: 64,
+    exists: true
+  }]));
+  const env = createEnvironment({
+    localState: {
+      version: 1,
+      watches: [],
+      updates: [],
+      quickDownloads: records,
+      activity: [],
+      lastScanAt: null
+    },
+    initialDownloads
+  });
+  await importBackground("collection-recovery");
+
+  await waitFor(
+    () => env.local.wnacgStateV1.quickDownloads.every((item) => item.status === "downloaded"),
+    "合集下载应按子任务从 Chrome 下载记录恢复"
+  );
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2);
+  assert.equal(
+    env.local.wnacgStateV1.quickDownloads.find((item) => item.aid === "230002").actualFilePath,
+    "/Users/tester/Downloads/恢复合集/恢复合集 2話.zip"
+  );
+});
+
 test("精确主页允许一键下载，但详情页与伪造主机仍被拒绝", async () => {
   const env = createEnvironment();
   await importBackground("homepage-source");
@@ -467,4 +560,208 @@ test("精确主页允许一键下载，但详情页与伪造主机仍被拒绝",
   assert.equal(detail.ok, false);
   assert.equal(forged.ok, false);
   assert.equal(env.downloadCalls, 1);
+});
+
+test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知父按钮", async () => {
+  const sourceAid = "388288";
+  const items = [
+    { aid: "213231", title: "朋友的媽媽 外傳1-3話" },
+    { aid: "215244", title: "朋友的媽媽 外傳4-5話" },
+    { aid: "217722", title: "朋友的媽媽 外傳6-7話" }
+  ];
+  const env = createEnvironment({
+    collection: { sourceAid, items, total: 3, limit: 30 }
+  });
+  await importBackground("collection-download");
+
+  const result = await env.send(
+    sourceAid,
+    61,
+    undefined,
+    "朋友的媽媽 外傳",
+    true
+  );
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 3);
+  assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
+    "朋友的媽媽 外傳/朋友的媽媽 外傳1-3話.zip",
+    "朋友的媽媽 外傳/朋友的媽媽 外傳4-5話.zip",
+    "朋友的媽媽 外傳/朋友的媽媽 外傳6-7話.zip"
+  ]);
+  assert.deepEqual(
+    env.local.wnacgStateV1.quickDownloads.map((item) => ({
+      recordKey: item.recordKey,
+      sourceAid: item.sourceAid,
+      aid: item.aid,
+      status: item.status
+    })),
+    items.map((item) => ({
+      recordKey: `bundle:${sourceAid}:${item.aid}`,
+      sourceAid,
+      aid: item.aid,
+      status: "downloading"
+    }))
+  );
+
+  for (const downloadId of [901, 902]) {
+    env.downloads.get(downloadId).state = "complete";
+    env.change({ id: downloadId, state: { current: "complete" } });
+  }
+  await waitFor(
+    () => env.local.wnacgStateV1.quickDownloads.filter((item) => item.status === "downloaded").length === 2,
+    "前两个合集子项应分别完成"
+  );
+  assert.equal(env.sentMessages.length, 0, "合集未全部完成时不应把父按钮标成完成");
+
+  env.downloads.get(903).state = "complete";
+  env.change({ id: 903, state: { current: "complete" } });
+  await waitFor(() => env.sentMessages.length === 1, "合集全部完成后应通知父按钮");
+  assert.equal(env.sentMessages[0].message.aid, sourceAid);
+  assert.equal(env.sentMessages[0].message.state, "complete");
+  assert.match(env.sentMessages[0].message.message, /3 个文件/);
+});
+
+test("合集部分创建失败后再次点击只重试失败子项", async () => {
+  const sourceAid = "388290";
+  const items = [
+    { aid: "220001", title: "重试合集 1話" },
+    { aid: "220002", title: "重试合集 2話" },
+    { aid: "220003", title: "重试合集 3話" }
+  ];
+  const env = createEnvironment({
+    collection: { sourceAid, items, total: 3, limit: 30 },
+    downloadError: (attempt) => attempt === 2 ? new Error("network unavailable") : null
+  });
+  await importBackground("collection-partial-retry");
+
+  const first = await env.send(sourceAid, 62, undefined, "重试合集", true);
+  assert.equal(first.state, "downloading");
+  assert.equal(env.downloadCalls, 3);
+  const failed = env.local.wnacgStateV1.quickDownloads.find(
+    (item) => item.recordKey === `bundle:${sourceAid}:220002`
+  );
+  assert.equal(failed.status, "failed");
+
+  for (const downloadId of [901, 903]) {
+    env.downloads.get(downloadId).state = "complete";
+    env.change({ id: downloadId, state: { current: "complete" } });
+  }
+  await waitFor(
+    () => env.sentMessages.at(-1)?.message.state === "error",
+    "其余子项结束后父按钮应显示可重试错误"
+  );
+
+  const retry = await env.send(sourceAid, 62, undefined, "重试合集", true);
+  assert.equal(retry.state, "downloading");
+  assert.equal(env.downloadCalls, 4, "重试不应重复创建两个已完成子项");
+  assert.equal(env.downloadOptions[3].filename, "重试合集/重试合集 2話.zip");
+  env.downloads.get(904).state = "complete";
+  env.change({ id: 904, state: { current: "complete" } });
+  await waitFor(
+    () => env.sentMessages.at(-1)?.message.state === "complete",
+    "失败子项重试成功后父按钮应完成"
+  );
+  assert.ok(env.local.wnacgStateV1.quickDownloads.every((item) => item.status === "downloaded"));
+});
+
+test("超过 30 话的合集会读取分页接口并下载完整清单", async () => {
+  const sourceAid = "388291";
+  const firstPageItems = Array.from({ length: 30 }, (_, index) => ({
+    aid: String(300001 + index),
+    title: `分页合集 ${index + 1}話`
+  }));
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      items: firstPageItems,
+      total: 31,
+      limit: 30,
+      pages: {
+        2: {
+          code: 0,
+          list: [{
+            id: 300031,
+            idx: 31,
+            name: "分页合集 31話",
+            dl2: "https://dl1.wn01.download/down/300031/300031.zip?n=300031"
+          }],
+          total: 31,
+          page: 2,
+          limit: 30
+        }
+      }
+    }
+  });
+  await importBackground("collection-pagination");
+
+  const result = await env.send(sourceAid, 63, undefined, "分页合集", true);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 31);
+  assert.equal(
+    env.fetchUrls[1],
+    `https://www.wnacg.com/?ctl=download&act=chapters&sid=${sourceAid}&page=2`
+  );
+  assert.equal(env.downloadOptions.at(-1).filename, "分页合集/分页合集 31話.zip");
+});
+
+test("合集章节清单不完整时在创建任何 Chrome 下载前终止", async () => {
+  const sourceAid = "388293";
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      items: [
+        { aid: "240001", title: "残缺合集 1話" },
+        { aid: "240002", title: "残缺合集 2話" }
+      ],
+      total: 3,
+      limit: 30
+    }
+  });
+  await importBackground("collection-incomplete");
+
+  const result = await env.send(sourceAid, 64, undefined, "残缺合集", true);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /章节清单不完整/);
+  assert.equal(env.downloadCalls, 0);
+  assert.deepEqual(env.local.wnacgStateV1.quickDownloads, []);
+});
+
+test("合集写回清单时移除旧版父 aid 单记录", async () => {
+  const sourceAid = "388294";
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      items: [
+        { aid: "250001", title: "迁移合集 1話" },
+        { aid: "250002", title: "迁移合集 2話" }
+      ],
+      total: 2,
+      limit: 30
+    },
+    localState: {
+      version: 1,
+      watches: [],
+      updates: [],
+      quickDownloads: [{
+        aid: sourceAid,
+        title: "迁移合集",
+        comicName: "迁移合集",
+        status: "failed",
+        relativePath: "迁移合集/迁移合集.zip",
+        error: "旧版父记录"
+      }],
+      activity: [],
+      lastScanAt: null
+    }
+  });
+  await importBackground("collection-remove-legacy-parent");
+
+  const result = await env.send(sourceAid, 65, undefined, "迁移合集", true);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2);
+  assert.deepEqual(
+    env.local.wnacgStateV1.quickDownloads.map((item) => item.recordKey),
+    [`bundle:${sourceAid}:250001`, `bundle:${sourceAid}:250002`]
+  );
+  assert.ok(env.local.wnacgStateV1.quickDownloads.every((item) => item.sourceAid === sourceAid));
 });

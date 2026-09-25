@@ -15,7 +15,9 @@
       const url = new URL(link.getAttribute("href") || "", location.href);
       const aid = url.pathname.match(/^\/photos-index-aid-(\d+)\.html$/i)?.[1];
       const title = String(link.getAttribute("title") || link.textContent || "").trim();
-      return aid && title ? { aid, title, titleLink } : null;
+      const isCollection = [...item.querySelectorAll(".sr_ctag")]
+        .some((node) => String(node.textContent || "").trim() === "合集");
+      return aid && title ? { aid, title, titleLink, isCollection } : null;
     } catch {
       return null;
     }
@@ -84,12 +86,13 @@
     button.title = label;
   }
 
-  function createButton({ aid, title }) {
+  function createButton({ aid, title, isCollection }) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = BUTTON_CLASS;
     button.dataset.aid = aid;
     button.dataset.title = title;
+    button.dataset.collection = isCollection ? "true" : "false";
     button.append(icon());
     setButtonState(button, "idle");
     return button;
@@ -159,7 +162,8 @@
       const response = await chrome.runtime.sendMessage({
         type: QUICK_DOWNLOAD,
         aid: button.dataset.aid,
-        title: button.dataset.title
+        title: button.dataset.title,
+        isCollection: button.dataset.collection === "true"
       });
       if (!response?.ok) throw new Error(response?.message || "无法创建下载任务。");
       setButtonState(button, response.state || "downloading", response.message);
