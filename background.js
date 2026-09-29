@@ -124,7 +124,9 @@ async function resolveDownloadItems({ aid, title }) {
 
   if (manifest.isCollection) {
     const pageCount = Math.ceil(manifest.total / Math.max(1, manifest.limit));
-    for (let page = 2; page <= pageCount; page += 1) {
+    // 页面章节行不完整时先请求接口第一页，避免把缺失的话数当作已下载。
+    const firstApiPage = items.length < Math.min(manifest.total, manifest.limit) ? 1 : 2;
+    for (let page = firstApiPage; page <= pageCount; page += 1) {
       const pageUrl = new URL("https://www.wnacg.com/");
       pageUrl.search = new URLSearchParams({
         ctl: "download",

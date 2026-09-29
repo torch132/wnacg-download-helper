@@ -599,9 +599,30 @@ export function extractChapterLabel(title, { seriesPrefix = "" } = {}) {
   return match ? compactChapterLabel(match[1]) : null;
 }
 
+export function buildBaselineFromDownloadItems(album, items = []) {
+  if (!items[0]?.isCollection) {
+    return { aid: album.aid, title: album.title, kind: "series" };
+  }
+  const chapterIds = [...new Set(items.map((item) => String(item.downloadAid)))];
+  const newest = [...items].sort(
+    (left, right) => Number(right.downloadAid) - Number(left.downloadAid)
+  )[0];
+  return {
+    aid: album.aid,
+    title: newest.title,
+    kind: "series",
+    isCollection: true,
+    collectionBaselineAid: newest.downloadAid,
+    collectionBaselineChapterIds: chapterIds
+  };
+}
+
 export function formatBaselineLabel(watch = {}) {
   const aid = String(watch.baselineAid ?? "").trim() || "未知";
   if (watch.baselineKind === "global") return `aid ${aid}`;
+  if (watch.isCollection && Array.isArray(watch.collectionBaselineChapterIds)) {
+    return `已记录 ${watch.collectionBaselineChapterIds.length} 話`;
+  }
   return extractChapterLabel(watch.baselineTitle, {
     seriesPrefix: watch.prefix || watch.titlePrefix || ""
   }) || `aid ${aid}`;
@@ -695,7 +716,9 @@ export function createUpdateCandidates({
 
 export function filterAlbumsAfterBaselines(albums = [], watchItems = []) {
   return albums.filter((album) => {
-    const watchItem = findLongestPrefixMatch(album?.title, watchItems);
+    const watchItem =
+      watchItems.find((item) => item?.id && item.id === album?.watchId) ||
+      findLongestPrefixMatch(album?.title, watchItems);
     if (!watchItem) return false;
     const aid = Number(
       album?.isCollection ? album?.sourceAid : album?.aid ?? extractAid(album?.url),
@@ -704,10 +727,26 @@ export function filterAlbumsAfterBaselines(albums = [], watchItems = []) {
     if (!Number.isFinite(aid) || !Number.isFinite(baselineAid)) return false;
     if (!album?.isCollection) return aid > baselineAid;
     if (aid !== baselineAid) return aid > baselineAid;
+    if (Array.isArray(watchItem.collectionBaselineChapterIds)) {
+      const knownIds = new Set(watchItem.collectionBaselineChapterIds.map(String));
+      return !knownIds.has(String(album?.downloadAid || album?.aid));
+    }
+    // 旧版关注项只保存最新子 aid，升级后首次扫描仍按原边界判断。
     const childAid = Number(album?.downloadAid || album?.aid);
     const childBaseline = Number(watchItem?.collectionBaselineAid);
     return !Number.isFinite(childBaseline) || childAid > childBaseline;
   });
+}
+
+export function shouldInspectCollection(album, watchItem) {
+  if (!watchItem) return false;
+  if (album?.isCollection) return true;
+  const sourceAid = String(album?.sourceAid || album?.aid || "");
+  const baselineAid = String(watchItem?.baselineAid || "");
+  return Boolean(
+    (watchItem?.isCollection && sourceAid && sourceAid === baselineAid) ||
+    normalizeTitle(album?.title) === normalizeTitle(watchItem?.prefix)
+  );
 }
 
 export function findReachedBaselineIds(albums = [], watchItems = []) {

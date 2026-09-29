@@ -1,6 +1,7 @@
 import {
   UPDATE_STATUS,
   WnacgParseError,
+  buildBaselineFromDownloadItems,
   buildTagPageScanPlan,
   createUpdateCandidates,
   filterAlbumsAfterBaselines,
@@ -13,6 +14,7 @@ import {
   parseCollectionChapterPage,
   parseDownloadItemsText,
   parseDownloadPageHtml,
+  shouldInspectCollection,
   splitTitleTags,
   transitionUpdate
 } from "./core.js";
@@ -89,12 +91,13 @@ async function readCurrentPageSnapshot() {
   const [execution] = await chrome.scripting.executeScript({
     target: { tabId: activeTab.id },
     func: () => {
-      if (
-        location.hostname !== "www.wnacg.com" ||
-        !location.pathname.startsWith("/albums-")
-      ) {
-        return null;
+      if (location.hostname !== "www.wnacg.com") return null;
+      const detailAid = location.pathname.match(/^\/photos-index-aid-(\d+)\.html$/i)?.[1];
+      if (detailAid) {
+        const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+        return { url: location.href, title, albums: [], detailAid };
       }
+      if (!location.pathname.startsWith("/albums-")) return null;
       const seenAids = new Set();
       const albums = [];
       for (const item of document.querySelectorAll(".gallary_item")) {
@@ -120,7 +123,7 @@ async function readCurrentPageSnapshot() {
     }
   });
   const snapshot = execution?.result;
-  return snapshot?.albums?.length ? snapshot : null;
+  return snapshot?.detailAid || snapshot?.albums?.length ? snapshot : null;
 }
 
 async function refreshCurrentPageSnapshot() {
@@ -135,8 +138,9 @@ async function importCurrentPageMatches(watches, collectionCache = new Map()) {
     watches,
     collectionCache
   );
+  const isTagPage = buildTagPageScanPlan(currentPageSnapshot.url, MAX_TAG_SCAN_PAGES).length > 0;
   const result = createUpdateCandidates({
-    albums,
+    albums: isTagPage ? albums : filterAlbumsAfterBaselines(albums, watches),
     watchItems: watches,
     existingRecords: state.updates,
     detectedAt: new Date().toISOString()
@@ -296,19 +300,26 @@ async function resolveDownloadItems(album) {
     pageUrl: downloadPageUrl,
     baseUrl: downloadPageUrl
   });
-  if (!album?.isCollection) return firstPage.items;
   if (firstPage.kind !== "collection") {
-    throw new WnacgParseError(`“${album.title}”已标记为合集，但下载页没有章节清单。`);
+    if (album?.isCollection) {
+      throw new WnacgParseError(`“${album.title}”已标记为合集，但下载页没有章节清单。`);
+    }
+    return firstPage.items;
   }
 
   const items = [...firstPage.items];
   const pages = Math.ceil(firstPage.total / firstPage.limit);
-  for (let page = 2; page <= pages; page += 1) {
+  // 页面声明的话数多于已渲染行数时，先从章节接口补齐第一页。
+  const firstApiPage = items.length < Math.min(firstPage.total, firstPage.limit) ? 1 : 2;
+  for (let page = firstApiPage; page <= pages; page += 1) {
     const url = `https://www.wnacg.com/?ctl=download&act=chapters&sid=${encodeURIComponent(sourceAid)}&page=${page}`;
     const parsed = parseCollectionChapterPage(await fetchText(url), { sourceAid });
     items.push(...parsed.items);
   }
   const unique = [...new Map(items.map((item) => [item.recordKey, item])).values()];
+  if (unique.length === 0) {
+    throw new WnacgParseError("合集下载页没有可下载的子章节。");
+  }
   if (unique.length < firstPage.total) {
     throw new WnacgParseError(
       `合集章节清单不完整：预期 ${firstPage.total} 话，仅识别 ${unique.length} 话。`
@@ -321,7 +332,7 @@ async function expandMatchedCollections(albums, watches, cache = new Map()) {
   const expanded = [];
   for (const album of albums) {
     const watch = findLongestPrefixMatch(album?.title, watches);
-    if (!album?.isCollection || !watch) {
+    if (!shouldInspectCollection(album, watch)) {
       expanded.push(album);
       continue;
     }
@@ -330,6 +341,10 @@ async function expandMatchedCollections(albums, watches, cache = new Map()) {
       cache.set(sourceAid, resolveDownloadItems(album));
     }
     const items = await cache.get(sourceAid);
+    if (!items[0]?.isCollection) {
+      expanded.push(album);
+      continue;
+    }
     for (const item of items) {
       expanded.push({
         ...item,
@@ -435,6 +450,7 @@ async function handleWatchSubmit(event) {
       enabled: previous?.enabled ?? true,
       baselineAid: baseline.aid,
       collectionBaselineAid: baseline.collectionBaselineAid || null,
+      collectionBaselineChapterIds: baseline.collectionBaselineChapterIds || null,
       baselineKind: baseline.kind,
       baselineTitle: baseline.title,
       isCollection: Boolean(baseline.isCollection),
@@ -480,6 +496,17 @@ async function handleWatchSubmit(event) {
 async function findBaseline(prefix) {
   let newestGlobal = null;
   const temporaryWatch = { id: "baseline", prefix, enabled: true };
+  if (
+    currentPageSnapshot?.detailAid &&
+    normalizeTitle(currentPageSnapshot.title).includes(normalizeTitle(prefix))
+  ) {
+    return baselineFromAlbum({
+      aid: currentPageSnapshot.detailAid,
+      title: prefix,
+      url: currentPageSnapshot.url,
+      isCollection: false
+    });
+  }
   const tagPlan = buildTagPageScanPlan(
     currentPageSnapshot?.url,
     MAX_TAG_SCAN_PAGES
@@ -518,20 +545,8 @@ async function findBaseline(prefix) {
 }
 
 async function baselineFromAlbum(album) {
-  if (!album?.isCollection) {
-    return { aid: album.aid, title: album.title, kind: "series" };
-  }
   const items = await resolveDownloadItems(album);
-  const newest = [...items].sort(
-    (left, right) => Number(right.downloadAid) - Number(left.downloadAid)
-  )[0];
-  return {
-    aid: album.aid,
-    title: newest?.title || album.title,
-    kind: "series",
-    isCollection: true,
-    collectionBaselineAid: newest?.downloadAid || null
-  };
+  return buildBaselineFromDownloadItems(album, items);
 }
 
 function handleWatchListClick(event) {
@@ -596,6 +611,7 @@ async function scanForUpdates() {
   const newestMatches = new Map();
   const newestCollectionMatches = new Map();
   const collectionCache = new Map();
+  let directCollectionsScanned = 0;
   let pagesScanned = 0;
   let tagPagesScanned = 0;
   let totalAdded = 0;
@@ -605,7 +621,43 @@ async function scanForUpdates() {
     const tagImport = await importCurrentTagPages(watches);
     tagPagesScanned = tagImport.pagesScanned;
     totalAdded += tagImport.added.length;
-    for (let page = 1; page <= MAX_SCAN_PAGES; page += 1) {
+    for (const watch of watches) {
+      if (!watch.isCollection || !watch.baselineAid) continue;
+      setScanProgress(0, MAX_SCAN_PAGES, `正在复查合集“${watch.prefix}”`);
+      const sourceAid = String(watch.baselineAid);
+      if (!collectionCache.has(sourceAid)) {
+        collectionCache.set(sourceAid, resolveDownloadItems({
+          aid: sourceAid,
+          title: watch.prefix,
+          isCollection: true
+        }));
+      }
+      const items = await collectionCache.get(sourceAid);
+      const albums = items.map((item) => ({
+        ...item,
+        watchId: watch.id,
+        url: `https://www.wnacg.com/photos-index-aid-${item.downloadAid}.html`
+      }));
+      const result = createUpdateCandidates({
+        albums: filterAlbumsAfterBaselines(albums, [watch]),
+        watchItems: [watch],
+        existingRecords: state.updates,
+        detectedAt: new Date().toISOString()
+      });
+      state.updates = result.records;
+      totalAdded += result.added.length;
+      const baseline = buildBaselineFromDownloadItems({ aid: sourceAid, title: watch.prefix }, items);
+      watch.collectionBaselineAid = baseline.collectionBaselineAid;
+      watch.collectionBaselineChapterIds = [...new Set([
+        ...(watch.collectionBaselineChapterIds || []).map(String),
+        ...baseline.collectionBaselineChapterIds
+      ])];
+      watch.baselineTitle = baseline.title;
+      watch.updatedAt = new Date().toISOString();
+      reachedBoundary.set(watch.id, true);
+      directCollectionsScanned += 1;
+    }
+    for (let page = 1; page <= MAX_SCAN_PAGES && ![...reachedBoundary.values()].every(Boolean); page += 1) {
       pagesScanned = page;
       setScanProgress(page, MAX_SCAN_PAGES, "正在读取韩漫/汉化栏目");
       const albums = await loadAlbumPage(page);
@@ -617,14 +669,17 @@ async function scanForUpdates() {
           findLongestPrefixMatch(album.title, watches);
         if (!watch) continue;
         const previous = newestCollectionMatches.get(watch.id);
-        const isNewer = !previous ||
-          Number(album.sourceAid) > Number(previous.sourceAid) ||
-          (
-            Number(album.sourceAid) === Number(previous.sourceAid) &&
-            Number(album.downloadAid) > Number(previous.downloadAid)
-          );
-        if (isNewer) {
-          newestCollectionMatches.set(watch.id, album);
+        if (!previous || Number(album.sourceAid) > Number(previous.sourceAid)) {
+          newestCollectionMatches.set(watch.id, {
+            sourceAid: album.sourceAid,
+            newest: album,
+            chapterIds: new Set([String(album.downloadAid)])
+          });
+        } else if (Number(album.sourceAid) === Number(previous.sourceAid)) {
+          previous.chapterIds.add(String(album.downloadAid));
+          if (Number(album.downloadAid) > Number(previous.newest.downloadAid)) {
+            previous.newest = album;
+          }
         }
       }
       for (const album of albums) {
@@ -652,11 +707,18 @@ async function scanForUpdates() {
     for (const watch of watches) {
       if (!reachedBoundary.get(watch.id)) continue;
       const newest = newestMatches.get(watch.id);
-      const newestChild = newestCollectionMatches.get(watch.id);
-      if (newestChild && Number(newestChild.sourceAid) >= Number(watch.baselineAid)) {
-        watch.baselineAid = newestChild.sourceAid;
-        watch.collectionBaselineAid = newestChild.downloadAid;
-        watch.baselineTitle = newestChild.title;
+      const collection = newestCollectionMatches.get(watch.id);
+      if (collection && Number(collection.sourceAid) >= Number(watch.baselineAid)) {
+        const previousIds = String(collection.sourceAid) === String(watch.baselineAid) &&
+          Array.isArray(watch.collectionBaselineChapterIds)
+          ? watch.collectionBaselineChapterIds : [];
+        watch.baselineAid = collection.sourceAid;
+        watch.collectionBaselineAid = collection.newest.downloadAid;
+        watch.collectionBaselineChapterIds = [...new Set([
+          ...previousIds.map(String),
+          ...collection.chapterIds
+        ])];
+        watch.baselineTitle = collection.newest.title;
         watch.isCollection = true;
         watch.baselineKind = "series";
         watch.updatedAt = new Date().toISOString();
@@ -666,6 +728,7 @@ async function scanForUpdates() {
         watch.baselineTitle = baseline.title;
         watch.isCollection = Boolean(baseline.isCollection);
         watch.collectionBaselineAid = baseline.collectionBaselineAid || null;
+        watch.collectionBaselineChapterIds = baseline.collectionBaselineChapterIds || null;
         watch.baselineKind = "series";
         watch.updatedAt = new Date().toISOString();
       }
@@ -675,7 +738,7 @@ async function scanForUpdates() {
     addActivity(
       state,
       incomplete.length ? "warning" : "success",
-      `${tagPagesScanned ? `扫描标签 ${tagPagesScanned} 页、` : ""}扫描栏目 ${pagesScanned} 页，发现 ${totalAdded} 个新章节${
+      `${tagPagesScanned ? `扫描标签 ${tagPagesScanned} 页、` : ""}${directCollectionsScanned ? `复查合集 ${directCollectionsScanned} 项、` : ""}扫描栏目 ${pagesScanned} 页，发现 ${totalAdded} 个新章节${
         incomplete.length ? `；${incomplete.length} 个关注项未到达基线` : ""
       }。`
     );

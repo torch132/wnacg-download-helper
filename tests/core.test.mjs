@@ -87,6 +87,16 @@ test("parseAlbumListHtml 从真实页面结构提取并按 aid 去重", async ()
   );
 });
 
+test("合集分类与连载或完结状态独立，普通连载仍是单话", () => {
+  const html = `<ul>
+    <li class="gallary_item"><a href="/photos-index-aid-390059.html" title="连载合集"><span class="sr_ctag">合集</span><span class="sr_stag">連載中</span></a></li>
+    <li class="gallary_item"><a href="/photos-index-aid-390060.html" title="完结合集"><span class="sr_ctag">合集</span><span class="sr_stag end">完結</span></a></li>
+    <li class="gallary_item"><a href="/photos-index-aid-390061.html" title="普通连载 7話"><span class="sr_stag">連載中</span></a></li>
+  </ul>`;
+  const albums = core.parseAlbumListHtml(html, { parserCtor: SimpleDOMParser });
+  assert.deepEqual(albums.map((album) => album.isCollection), [true, true, false]);
+});
+
 test("parseAlbumListHtml 在结构变化或缺少 DOMParser 时明确失败", () => {
   assert.throws(
     () => core.parseAlbumListHtml("<html></html>", { parserCtor: SimpleDOMParser }),
@@ -419,6 +429,36 @@ test("合集子章节按父子 recordKey 去重，并允许父 aid 等于基线�
     "bundle:388288:300031",
   ]);
   assert.equal(result.added[0].zipUrl, "https://dl1.wn01.download/b.zip");
+});
+
+test("连载合集以现有全部七话为基线，并按子 aid 集合找新增话", () => {
+  const album = { aid: "390059", title: "连载合集" };
+  const items = Array.from({ length: 7 }, (_, index) => ({
+    downloadAid: String(390101 + index),
+    title: `连载合集 ${index + 1}話`,
+    isCollection: true
+  }));
+  const baseline = core.buildBaselineFromDownloadItems(album, items);
+  assert.deepEqual(baseline.collectionBaselineChapterIds, items.map((item) => item.downloadAid));
+  assert.equal(core.formatBaselineLabel({ ...baseline, baselineAid: baseline.aid }), "已记录 7 話");
+  const watch = { id: "serial", prefix: "连载合集", enabled: true,
+    baselineAid: baseline.aid, isCollection: true,
+    collectionBaselineChapterIds: baseline.collectionBaselineChapterIds };
+  const chapters = [
+    ...items.map((item) => ({ ...item, aid: item.downloadAid, sourceAid: album.aid, watchId: watch.id })),
+    { aid: "390099", downloadAid: "390099", sourceAid: album.aid,
+      title: "连载合集 特别篇", isCollection: true, watchId: watch.id }
+  ];
+  assert.deepEqual(
+    core.filterAlbumsAfterBaselines(chapters, [watch]).map((item) => item.downloadAid),
+    ["390099"],
+    "新子章节即使 aid 小于先前最大 aid，也不能漏检"
+  );
+  assert.equal(core.shouldInspectCollection({ ...album, title: "连载合集 外传" }, watch), true,
+    "卡片漏掉合集标签时仍须复查已知父 aid");
+  assert.equal(core.shouldInspectCollection(album, { prefix: album.title }), true,
+    "首次关注时应检查与系列名完全相同的卡片");
+  assert.equal(core.shouldInspectCollection({ aid: "390061", title: "普通连载 7話" }, watch), false);
 });
 
 test("transitionUpdate 强制合法状态流并维护选择/错误状态", () => {

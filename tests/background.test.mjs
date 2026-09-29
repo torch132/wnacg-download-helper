@@ -621,6 +621,55 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
   assert.match(env.sentMessages[0].message.message, /3 个文件/);
 });
 
+test("连载合集补全当前七话后只下载后来新增的子章节", async () => {
+  const sourceAid = "390059";
+  const items = Array.from({ length: 7 }, (_, index) => ({
+    aid: String(390101 + index),
+    title: `连载合集 ${index + 1}話`
+  }));
+  const chapterPage = (chapters) => ({
+    code: 0,
+    sid: sourceAid,
+    list: chapters.map((item) => ({
+      id: item.aid,
+      name: item.title,
+      dl2: `https://dl1.wn01.download/down/${item.aid}/${item.aid}.zip`
+    })),
+    total: chapters.length,
+    page: 1,
+    limit: 30
+  });
+  const collection = {
+    sourceAid,
+    items: items.slice(0, 2),
+    total: 7,
+    limit: 30,
+    pages: { 1: chapterPage(items) }
+  };
+  const env = createEnvironment({ collection });
+  await importBackground("serial-collection-seven-chapters");
+
+  const first = await env.send(sourceAid, 66, undefined, "连载合集", false);
+  assert.equal(first.state, "downloading", "下载页结构应覆盖缺失的卡片合集标签");
+  assert.equal(env.downloadCalls, 7);
+  assert.ok(env.fetchUrls.some((url) => url.includes(`sid=${sourceAid}&page=1`)));
+  for (let id = 901; id <= 907; id += 1) {
+    env.downloads.get(id).state = "complete";
+    env.change({ id, state: { current: "complete" } });
+  }
+  await waitFor(() => env.sentMessages.at(-1)?.message.state === "complete",
+    "七话完成后父按钮应显示完成");
+
+  const eighth = { aid: "390108", title: "连载合集 8話" };
+  collection.items = items.slice(0, 3);
+  collection.total = 8;
+  collection.pages[1] = chapterPage([...items, eighth]);
+  const second = await env.send(sourceAid, 66, undefined, "连载合集", false);
+  assert.equal(second.state, "downloading");
+  assert.equal(env.downloadCalls, 8, "再次点击只应下载新增的第八话");
+  assert.equal(env.downloadOptions.at(-1).filename, "连载合集/连载合集 8話.zip");
+});
+
 test("合集部分创建失败后再次点击只重试失败子项", async () => {
   const sourceAid = "388290";
   const items = [
