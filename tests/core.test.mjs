@@ -431,6 +431,67 @@ test("合集子章节按父子 recordKey 去重，并允许父 aid 等于基线�
   assert.equal(result.added[0].zipUrl, "https://dl1.wn01.download/b.zip");
 });
 
+test("旧独立话与合集子话合并为同一进度并保留成功文件", () => {
+  const old = {
+    aid: "388404", recordKey: "album:388404", watchId: "comic",
+    comicName: "砲友滿屋", title: "砲友滿屋 18-19話",
+    status: "downloaded", selected: false,
+    detectedAt: "2026-09-28T17:05:00Z",
+    filePath: "砲友滿屋/砲友滿屋 18-19話.zip"
+  };
+  const bundle = {
+    aid: "388404", downloadAid: "388404", sourceAid: "390062",
+    recordKey: "bundle:390062:388404", isCollection: true,
+    watchId: "comic", comicName: "砲友滿屋",
+    title: "砲友滿屋 18-19話", status: "failed", selected: true,
+    detectedAt: "2026-09-29T19:47:00Z", error: "ZIP 请求失败（HTTP 503）。",
+    zipUrl: "https://dl1.wn01.download/388404.zip"
+  };
+  const [merged] = core.reconcileEquivalentChapterUpdates([old, bundle]);
+  assert.equal(core.reconcileEquivalentChapterUpdates([old, bundle]).length, 1);
+  assert.equal(merged.recordKey, bundle.recordKey);
+  assert.equal(merged.status, "downloaded");
+  assert.equal(merged.selected, false);
+  assert.equal(merged.error, null);
+  assert.equal(merged.filePath, old.filePath);
+  assert.equal(merged.zipUrl, bundle.zipUrl);
+  assert.deepEqual(core.reconcileEquivalentChapterUpdates([merged]), [merged],
+    "重复加载状态不得再次改变已合并记录");
+
+  const reverse = core.reconcileEquivalentChapterUpdates([
+    { ...old, status: "failed", filePath: null, error: "HTTP 503" },
+    { ...bundle, status: "downloaded", filePath: "合集/18-19話.zip", error: null }
+  ]);
+  assert.equal(reverse.length, 1);
+  assert.equal(reverse[0].status, "downloaded");
+  assert.equal(reverse[0].filePath, "合集/18-19話.zip");
+
+  const watch = { id: "comic", prefix: "砲友滿屋", enabled: true };
+  const scanned = core.createUpdateCandidates({
+    albums: [{ ...bundle, title: bundle.title }],
+    watchItems: [watch],
+    existingRecords: [old]
+  });
+  assert.equal(scanned.records.length, 1);
+  assert.equal(scanned.added.length, 0);
+  assert.equal(scanned.records[0].status, "downloaded");
+
+  const unrelated = { ...old, watchId: "other", comicName: "另一部漫画" };
+  assert.equal(core.reconcileEquivalentChapterUpdates([unrelated, bundle]).length, 2);
+  assert.equal(core.reconcileEquivalentChapterUpdates([
+    { ...old, comicName: "另一部漫画" }, bundle
+  ]).length, 2, "关注项改名后不能仅凭 watchId 合并不同漫画");
+
+  const samePage = core.createUpdateCandidates({
+    albums: [{ ...old, status: undefined }, { ...bundle, status: undefined }],
+    watchItems: [watch],
+    existingRecords: []
+  });
+  assert.equal(samePage.records.length, 1,
+    "旧独立话与合集子话同一轮出现时也只能入队一次");
+  assert.equal(samePage.records[0].recordKey, bundle.recordKey);
+});
+
 test("连载合集以现有全部七话为基线，并按子 aid 集合找新增话", () => {
   const album = { aid: "390059", title: "连载合集" };
   const items = Array.from({ length: 7 }, (_, index) => ({

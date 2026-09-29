@@ -2,9 +2,11 @@ import {
   deriveComicName,
   findLongestPrefixMatch,
   isAllowedDownloadUrl,
+  isSameChapterAcrossCollections,
   parseCollectionChapterPage,
   parseDownloadItemsText,
   parseDownloadTitleText,
+  reconcileEquivalentChapterUpdates,
   sanitizeFileName,
   truncateUtf8
 } from "./core.js";
@@ -369,17 +371,25 @@ function aggregateSourceState(records) {
   return { state: "error", completed, total: expectedTotal };
 }
 
-async function findActiveByRecordKey(recordKey, tabIds = []) {
+async function findActiveByRecordKey(recordKey, tabIds = [], equivalentCandidate = null) {
   const active = await readActiveDownloads();
-  const entry = Object.entries(active).find(([, item]) => recordKeyFor(item) === recordKey);
+  const entry = Object.entries(active).find(([, item]) =>
+    recordKeyFor(item) === recordKey ||
+    (equivalentCandidate && isSameChapterAcrossCollections(item, equivalentCandidate))
+  );
   if (!entry) return null;
   const [downloadId, metadata] = entry;
   const mergedTabIds = mergeTabIds(metadata.tabIds, tabIds);
-  if (mergedTabIds.length !== (metadata.tabIds || []).length) {
+  const migrated = recordKeyFor(metadata) !== recordKey;
+  if (migrated || mergedTabIds.length !== (metadata.tabIds || []).length) {
+    if (migrated) {
+      Object.assign(metadata, equivalentCandidate);
+      metadata.aid = equivalentCandidate.downloadAid;
+    }
     metadata.tabIds = mergedTabIds;
     activeMemory.set(Number(downloadId), metadata);
     await mutateActiveDownloads((latest) => {
-      if (latest[downloadId]) latest[downloadId].tabIds = metadata.tabIds;
+      if (latest[downloadId]) latest[downloadId] = metadata;
     });
   }
   return { downloadId: Number(downloadId), metadata };
@@ -434,16 +444,32 @@ async function startQuickDownload(request, flight) {
     initialState.watches,
     manifest.officialTitle
   );
-  const existingByKey = new Map(
-    initialState.quickDownloads.map((record) => [recordKeyFor(record), record])
-  );
+  const equivalentCandidate = (item) => ({ ...item, comicName,
+    collectionTotal: manifest.total });
+  const priorFor = (records, item) =>
+    records.find((record) => recordKeyFor(record) === item.recordKey) ||
+    records.find((record) =>
+      isSameChapterAcrossCollections(record, equivalentCandidate(item))
+    );
   const completedKeys = new Set();
+  const completedPrior = new Map();
   const activeKeys = new Set();
   for (const item of manifest.items) {
-    if (await completedQuickDownloadExists(existingByKey.get(item.recordKey))) {
+    const priorRecords = initialState.quickDownloads.filter((record) =>
+      recordKeyFor(record) === item.recordKey ||
+      isSameChapterAcrossCollections(record, equivalentCandidate(item))
+    );
+    for (const prior of priorRecords) {
+      if (!await completedQuickDownloadExists(prior)) continue;
       completedKeys.add(item.recordKey);
+      completedPrior.set(item.recordKey, prior);
+      break;
     }
-    const active = await findActiveByRecordKey(item.recordKey, flight.tabIds);
+    const active = await findActiveByRecordKey(
+      item.recordKey,
+      flight.tabIds,
+      { ...equivalentCandidate(item), sourceAid: manifest.sourceAid }
+    );
     if (active) {
       activeKeys.add(item.recordKey);
       flight.metadatas.set(active.downloadId, active.metadata);
@@ -456,7 +482,8 @@ async function startQuickDownload(request, flight) {
       state.quickDownloads.map((record) => [recordKeyFor(record), record])
     );
     for (const item of manifest.items) {
-      const current = latestByKey.get(item.recordKey);
+      const current = completedPrior.get(item.recordKey) ||
+        latestByKey.get(item.recordKey) || priorFor(state.quickDownloads, item);
       const record = {
         ...(current || {}),
         ...item,
@@ -480,7 +507,10 @@ async function startQuickDownload(request, flight) {
     const manifestKeys = new Set(manifest.items.map((item) => item.recordKey));
     state.quickDownloads = state.quickDownloads
       .filter((record) => manifest.isCollection
-        ? sourceAidFor(record) !== manifest.sourceAid
+        ? sourceAidFor(record) !== manifest.sourceAid &&
+          !manifest.items.some((item) =>
+            isSameChapterAcrossCollections(record, equivalentCandidate(item))
+          )
         : !manifestKeys.has(recordKeyFor(record)))
       .concat(manifest.items.map((item) => latestByKey.get(item.recordKey)));
   });
@@ -718,6 +748,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
       state.updates = state.updates.map((item) =>
         (
           recordKeyFor(item) === recordKeyFor(metadata) ||
+          isSameChapterAcrossCollections(item, metadata) ||
           (
             !item.recordKey &&
             !metadata.isCollection &&
@@ -735,6 +766,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
             }
           : item
       );
+      state.updates = reconcileEquivalentChapterUpdates(state.updates);
     }
     if (!alreadyFinal) {
       addActivity(

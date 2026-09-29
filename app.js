@@ -14,6 +14,7 @@ import {
   parseCollectionChapterPage,
   parseDownloadItemsText,
   parseDownloadPageHtml,
+  reconcileEquivalentChapterUpdates,
   shouldInspectCollection,
   splitTitleTags,
   transitionUpdate
@@ -47,6 +48,9 @@ async function init() {
   collectElements();
   bindEvents();
   state = await loadAppState();
+  const originalUpdateCount = state.updates.length;
+  state.updates = reconcileEquivalentChapterUpdates(state.updates);
+  const mergedCount = originalUpdateCount - state.updates.length;
 
   let recovered = 0;
   state.updates = state.updates.map((record) => {
@@ -56,8 +60,13 @@ async function init() {
       error: "上次下载因侧栏关闭或浏览器中断，请重试。"
     });
   });
+  if (mergedCount > 0) {
+    addActivity(state, "info", `已合并 ${mergedCount} 条旧独立话与合集重复记录。`);
+  }
   if (recovered > 0) {
     addActivity(state, "warning", `已恢复 ${recovered} 个被中断的下载任务。`);
+  }
+  if (mergedCount > 0 || recovered > 0) {
     await saveAppState(state);
   }
 

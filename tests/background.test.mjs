@@ -621,6 +621,126 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
   assert.match(env.sentMessages[0].message.message, /3 个文件/);
 });
 
+test("旧独立话的一键下载文件已存在时，合集不重复下载同一子话", async () => {
+  const childAid = "388404";
+  const parentAid = "390062";
+  const relativePath = "砲友滿屋/砲友滿屋 18-19話.zip";
+  const filename = `/Users/tester/Downloads/${relativePath}`;
+  const env = createEnvironment({
+    localState: {
+      version: 1,
+      watches: [], updates: [], activity: [], lastScanAt: null,
+      quickDownloads: [{
+        aid: childAid, recordKey: `album:${childAid}`,
+        comicName: "砲友滿屋", status: "downloaded",
+        relativePath, actualFilePath: filename, downloadId: 500,
+        startedAt: "2026-09-28T17:05:00Z"
+      }]
+    },
+    initialDownloads: new Map([[500, {
+      id: 500, state: "complete", filename, exists: true,
+      url: "https://dl1.wn01.download/old.zip",
+      finalUrl: "https://dl1.wn01.download/old.zip",
+      mime: "application/zip", fileSize: 32
+    }]]),
+    collection: {
+      sourceAid: parentAid,
+      items: [{ aid: childAid, title: "砲友滿屋 18-19話" }],
+      total: 1, limit: 30
+    }
+  });
+  await importBackground("collection-reuses-old-quick-download");
+
+  const result = await env.send(parentAid, 67, undefined, "砲友滿屋", false);
+  assert.equal(result.state, "complete");
+  assert.equal(env.downloadCalls, 0);
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
+  const record = env.local.wnacgStateV1.quickDownloads[0];
+  assert.equal(record.recordKey, `bundle:${parentAid}:${childAid}`);
+  assert.equal(record.status, "downloaded");
+  assert.equal(record.actualFilePath, filename);
+});
+
+test("旧独立话仍在下载时，合集接管同一任务而不创建第二个下载", async () => {
+  const childAid = "388405";
+  const parentAid = "390062";
+  const relativePath = "砲友滿屋/砲友滿屋 20-21話.zip";
+  const filename = `/Users/tester/Downloads/${relativePath}`;
+  const url = "https://dl1.wn01.download/old-388405.zip";
+  const env = createEnvironment({
+    localState: {
+      version: 1,
+      watches: [], updates: [], activity: [], lastScanAt: null,
+      quickDownloads: [{
+        aid: childAid, recordKey: `album:${childAid}`,
+        title: "砲友滿屋 20-21話", comicName: "砲友滿屋",
+        status: "downloading", relativePath, downloadId: 500,
+        zipUrl: url, startedAt: "2026-09-28T17:05:00Z"
+      }]
+    },
+    initialDownloads: new Map([[500, {
+      id: 500, state: "in_progress", filename,
+      url, finalUrl: url, mime: "application/zip", fileSize: 32, exists: true
+    }]]),
+    collection: {
+      sourceAid: parentAid,
+      items: [{ aid: childAid, title: "砲友滿屋 20-21話" }],
+      total: 1, limit: 30
+    }
+  });
+  await importBackground("collection-reuses-active-old-download");
+
+  const result = await env.send(parentAid, 68, undefined, "砲友滿屋", false);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 0);
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].recordKey,
+    `bundle:${parentAid}:${childAid}`);
+
+  env.downloads.get(500).state = "complete";
+  env.change({ id: 500, state: { current: "complete" } });
+  await waitFor(() => env.local.wnacgStateV1.quickDownloads[0].status === "downloaded",
+    "原下载任务结束后合集子章节应标记完成");
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].actualFilePath, filename);
+});
+
+test("合集一键下载完成会同步并合并旧独立话的失败进度", async () => {
+  const childAid = "388406";
+  const parentAid = "390062";
+  const env = createEnvironment({
+    localState: {
+      version: 1, watches: [], quickDownloads: [], activity: [], lastScanAt: null,
+      updates: [
+        { aid: childAid, recordKey: `album:${childAid}`, comicName: "砲友滿屋",
+          title: "砲友滿屋 22-23話", status: "failed", selected: true,
+          error: "HTTP 503" },
+        { aid: childAid, downloadAid: childAid, sourceAid: parentAid,
+          recordKey: `bundle:${parentAid}:${childAid}`, isCollection: true,
+          comicName: "砲友滿屋", title: "砲友滿屋 22-23話",
+          status: "pending", selected: true }
+      ]
+    },
+    collection: {
+      sourceAid: parentAid,
+      items: [{ aid: childAid, title: "砲友滿屋 22-23話" }],
+      total: 1, limit: 30
+    }
+  });
+  await importBackground("collection-completes-old-progress");
+
+  const result = await env.send(parentAid, 69, undefined, "砲友滿屋", false);
+  assert.equal(result.state, "downloading");
+  env.downloads.get(901).state = "complete";
+  env.change({ id: 901, state: { current: "complete" } });
+  await waitFor(() => env.local.wnacgStateV1.updates.length === 1 &&
+    env.local.wnacgStateV1.updates[0].status === "downloaded",
+  "下载完成后应只留一条已下载进度");
+  assert.equal(env.local.wnacgStateV1.updates[0].recordKey,
+    `bundle:${parentAid}:${childAid}`);
+  assert.equal(env.local.wnacgStateV1.updates[0].error, null);
+});
+
 test("连载合集补全当前七话后只下载后来新增的子章节", async () => {
   const sourceAid = "390059";
   const items = Array.from({ length: 7 }, (_, index) => ({

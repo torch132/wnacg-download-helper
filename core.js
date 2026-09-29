@@ -648,13 +648,75 @@ function comicNameFor(watchItem) {
   ).trim();
 }
 
+function chapterRecordKind(record) {
+  const aid = String(record?.downloadAid || record?.aid || "");
+  if (!/^\d+$/u.test(aid)) return null;
+  const key = String(record?.recordKey || `album:${aid}`);
+  if (key === `album:${aid}`) return "album";
+  return /^bundle:\d+:\d+$/u.test(key) && key.endsWith(`:${aid}`)
+    ? "bundle" : null;
+}
+
+export function isSameChapterAcrossCollections(first, second) {
+  // 旧独立话并入合集后，子 aid 不变；仅在同一漫画内跨两种记录键归并。
+  const kinds = [chapterRecordKind(first), chapterRecordKind(second)];
+  if (!kinds.includes("album") || !kinds.includes("bundle")) return false;
+  if (String(first?.downloadAid || first?.aid) !== String(second?.downloadAid || second?.aid)) {
+    return false;
+  }
+  const firstComic = normalizeTitle(first?.comicName);
+  const secondComic = normalizeTitle(second?.comicName);
+  if (firstComic && secondComic) return firstComic === secondComic;
+  return Boolean(first?.watchId && first.watchId === second?.watchId);
+}
+
+const UPDATE_STATUS_PRIORITY = Object.freeze({
+  downloaded: 5,
+  downloading: 4,
+  ignored: 3,
+  failed: 2,
+  pending: 1
+});
+
+function mergeEquivalentChapterUpdates(first, second) {
+  const bundle = chapterRecordKind(first) === "bundle" ? first : second;
+  const firstPriority = UPDATE_STATUS_PRIORITY[first.status] || 0;
+  const secondPriority = UPDATE_STATUS_PRIORITY[second.status] || 0;
+  const preferred = firstPriority > secondPriority ? first
+    : secondPriority > firstPriority ? second : bundle;
+  const merged = {
+    ...first,
+    ...second,
+    ...bundle,
+    status: preferred.status,
+    selected: [UPDATE_STATUS.DOWNLOADED, UPDATE_STATUS.IGNORED].includes(preferred.status)
+      ? false : Boolean(preferred.selected),
+    detectedAt: preferred.detectedAt || bundle.detectedAt || first.detectedAt,
+    error: preferred.status === UPDATE_STATUS.DOWNLOADED ? null : preferred.error || null
+  };
+  for (const field of ["filePath", "downloadedAt", "bytesWritten", "downloadMethod"]) {
+    if (preferred[field] != null) merged[field] = preferred[field];
+  }
+  return merged;
+}
+
+export function reconcileEquivalentChapterUpdates(records = []) {
+  const result = [];
+  for (const record of records) {
+    const index = result.findIndex((item) => isSameChapterAcrossCollections(item, record));
+    if (index === -1) result.push({ ...record });
+    else result[index] = mergeEquivalentChapterUpdates(result[index], record);
+  }
+  return result;
+}
+
 export function createUpdateCandidates({
   albums = [],
   watchItems = [],
   existingRecords = [],
   detectedAt = new Date().toISOString(),
 } = {}) {
-  const records = existingRecords.map((record) => ({ ...record }));
+  const records = reconcileEquivalentChapterUpdates(existingRecords);
   const existingByKey = new Map(
     records.map((record, index) => [
       String(record?.recordKey || `album:${record?.aid ?? ""}`),
@@ -686,8 +748,7 @@ export function createUpdateCandidates({
       continue;
     }
 
-    addedKeys.add(recordKey);
-    added.push({
+    const candidate = {
       aid,
       recordKey,
       sourceAid: String(album?.sourceAid || aid),
@@ -705,7 +766,27 @@ export function createUpdateCandidates({
       selected: true,
       detectedAt,
       error: null,
-    });
+    };
+    const equivalentIndex = records.findIndex((record) =>
+      isSameChapterAcrossCollections(record, candidate)
+    );
+    if (equivalentIndex !== -1) {
+      records[equivalentIndex] = mergeEquivalentChapterUpdates(
+        records[equivalentIndex], candidate
+      );
+      existingByKey.set(recordKey, equivalentIndex);
+      continue;
+    }
+    const pendingIndex = added.findIndex((record) =>
+      isSameChapterAcrossCollections(record, candidate)
+    );
+    if (pendingIndex !== -1) {
+      added[pendingIndex] = mergeEquivalentChapterUpdates(added[pendingIndex], candidate);
+      addedKeys.add(recordKey);
+      continue;
+    }
+    addedKeys.add(recordKey);
+    added.push(candidate);
   }
 
   return {
