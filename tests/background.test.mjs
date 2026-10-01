@@ -50,6 +50,7 @@ function createEnvironment({
   let changedListener;
   let determiningFilenameListener;
   let downloadCalls = 0;
+  const downloadStartTimes = [];
   const sentMessages = [];
   const downloads = new Map(initialDownloads);
   const downloadOptions = [];
@@ -131,6 +132,7 @@ function createEnvironment({
     downloads: {
       async download(options) {
         downloadCalls += 1;
+        downloadStartTimes.push(Date.now());
         downloadOptions.push(structuredClone(options));
         const currentError = typeof downloadError === "function"
           ? downloadError(downloadCalls)
@@ -212,6 +214,7 @@ function createEnvironment({
   return {
     downloads,
     downloadOptions,
+    downloadStartTimes,
     fetchUrls,
     sentMessages,
     sidePanelCalls,
@@ -321,6 +324,31 @@ test("同一 aid 的并发点击只创建一次下载并通知全部标签", asy
   assert.equal(env.local.wnacgStateV1.quickDownloads[0].status, "downloaded");
   assert.equal(env.local.wnacgStateV1.updates[0].status, "downloaded");
   assert.equal(env.local.wnacgStateV1.updates[0].downloadMethod, "quick");
+});
+
+test("不同标签页的下载共享全局一秒启动间隔", async () => {
+  const env = createEnvironment();
+  await importBackground("global-download-start-spacing");
+  const [first, second] = await Promise.all([
+    env.send("386229", 21),
+    env.send("386230", 22)
+  ]);
+  assert.equal(first.state, "downloading");
+  assert.equal(second.state, "downloading");
+  assert.equal(env.downloadCalls, 2);
+  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] >= 1_000,
+    "两次 Chrome 下载调用必须至少相隔一秒");
+});
+
+test("后台重启后沿用 session 中的下载间隔", async () => {
+  const env = createEnvironment();
+  const allowedAt = Date.now() + 1_000;
+  env.session.wnacgNextDownloadStartAt = allowedAt;
+  await importBackground("restored-download-start-spacing");
+  const result = await env.send("386233", 23);
+  assert.equal(result.state, "downloading");
+  assert.ok(env.downloadStartTimes[0] >= allowedAt,
+    "持久化的下次启动时间应在后台重启后生效");
 });
 
 test("普通漫画完成后再次点击会重新下载并保留前次记录", async () => {
@@ -459,6 +487,8 @@ test("首选文件名被 Chrome 拒绝时保留漫画目录并用 aid 文件名�
   const result = await env.send("386244", 55);
   assert.equal(result.state, "downloading");
   assert.equal(env.downloadCalls, 2);
+  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] >= 1_000,
+    "文件名回退也应经过同一下载启动队列");
   assert.equal(env.downloadOptions[0].filename, "测试漫画/测试漫画 386244話.zip");
   assert.equal(env.downloadOptions[1].filename, "测试漫画/wnacg-386244.zip");
   assert.equal(env.local.wnacgStateV1.quickDownloads[0].relativePath, "测试漫画/wnacg-386244.zip");
@@ -712,6 +742,9 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
   );
   assert.equal(result.state, "downloading");
   assert.equal(env.downloadCalls, 3);
+  assert.ok(env.downloadStartTimes.every((time, index, times) =>
+    index === 0 || time - times[index - 1] >= 1_000),
+  "合集相邻子话至少间隔一秒启动");
   assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
     "朋友的媽媽 外傳/朋友的媽媽 外傳1-3話.zip",
     "朋友的媽媽 外傳/朋友的媽媽 外傳4-5話.zip",

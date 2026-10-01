@@ -17,7 +17,9 @@ const QUICK_DOWNLOAD_STATUS = "WNACG_QUICK_DOWNLOAD_STATUS";
 const QUICK_DOWNLOAD_STATES = "WNACG_QUICK_DOWNLOAD_STATES";
 const ACTIVE_KEY = "wnacgQuickDownloads";
 const FILENAME_PATHS_KEY = "wnacgFilenamePaths";
+const NEXT_DOWNLOAD_START_KEY = "wnacgNextDownloadStartAt";
 const REQUEST_TIMEOUT_MS = 20_000;
+const DOWNLOAD_START_INTERVAL_MS = 1_000;
 const MAX_RELATIVE_PATH_BYTES = 240;
 const MAX_FOLDER_BYTES = 80;
 const MAX_FILE_BASE_BYTES = 180;
@@ -30,6 +32,8 @@ const desiredPathsByDownloadId = new Map();
 let stateWriteQueue = Promise.resolve();
 let activeWriteQueue = Promise.resolve();
 let filenamePathsWriteQueue = Promise.resolve();
+let downloadStartQueue = Promise.resolve();
+let nextDownloadStartAt = 0;
 let recoveryPromise = null;
 
 async function configureSidePanel() {
@@ -246,23 +250,56 @@ function isInvalidFilenameError(error) {
   return /invalid[ _-]?filename/iu.test(error?.message || String(error || ""));
 }
 
-async function createChromeDownload(zipUrl, relativePath) {
-  await rememberFilenamePath(zipUrl, relativePath);
-  try {
-    const downloadId = await chrome.downloads.download({
-      url: zipUrl,
-      filename: relativePath,
-      conflictAction: "uniquify",
-      saveAs: false
-    });
-    if (!Number.isInteger(downloadId)) {
-      throw new Error("Chrome 未能创建下载任务。");
+function createChromeDownload(zipUrl, relativePath) {
+  const operation = downloadStartQueue.then(async () => {
+    let persistedStartAt = 0;
+    try {
+      const stored = await chrome.storage.session.get(NEXT_DOWNLOAD_START_KEY);
+      persistedStartAt = Number(stored[NEXT_DOWNLOAD_START_KEY]) || 0;
+    } catch (error) {
+      console.warn("wnACG 下载间隔状态读取失败，继续使用本次后台的间隔", error);
     }
-    return downloadId;
-  } catch (error) {
-    await forgetFilenamePath(zipUrl, relativePath);
-    throw error;
-  }
+    // 时间戳异常或系统时钟回拨时最多等待一秒，避免队列被旧状态无限挂起。
+    const waitMs = Math.max(0, Math.min(
+      DOWNLOAD_START_INTERVAL_MS,
+      Math.max(nextDownloadStartAt, persistedStartAt) - Date.now()
+    ));
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+    // 文件名映射临近真正启动时才写入，避免长队列提前覆盖同 URL 的目标路径。
+    await rememberFilenamePath(zipUrl, relativePath);
+    try {
+      const downloadPromise = chrome.downloads.download({
+        url: zipUrl,
+        filename: relativePath,
+        conflictAction: "uniquify",
+        saveAs: false
+      });
+      // 以 API 调用后的时刻计算下一次启动，保证两次实际调用至少相隔 1 秒。
+      nextDownloadStartAt = Date.now() + DOWNLOAD_START_INTERVAL_MS;
+      const persistPromise = chrome.storage.session.set({
+        [NEXT_DOWNLOAD_START_KEY]: nextDownloadStartAt
+      }).catch((error) => {
+        console.warn("wnACG 下载间隔状态保存失败，继续使用本次后台的间隔", error);
+      });
+      let downloadId;
+      try {
+        downloadId = await downloadPromise;
+      } finally {
+        await persistPromise;
+      }
+      if (!Number.isInteger(downloadId)) {
+        throw new Error("Chrome 未能创建下载任务。");
+      }
+      return downloadId;
+    } catch (error) {
+      await forgetFilenamePath(zipUrl, relativePath);
+      throw error;
+    }
+  });
+  // 某次下载创建失败不能阻塞后续章节或其他标签页的队列。
+  downloadStartQueue = operation.catch(() => {});
+  return operation;
 }
 
 function downloadUrlKeys(value) {
