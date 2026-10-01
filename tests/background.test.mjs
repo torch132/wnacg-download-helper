@@ -46,6 +46,7 @@ function createEnvironment({
     }
   };
   let session = {};
+  const sessionReadKeys = [];
   let messageListener;
   let changedListener;
   let determiningFilenameListener;
@@ -111,7 +112,10 @@ function createEnvironment({
         }
       },
       session: {
-        get: async () => structuredClone(session),
+        get: async (key) => {
+          sessionReadKeys.push(key);
+          return structuredClone(session);
+        },
         set: async (value) => {
           session = { ...session, ...structuredClone(value) };
         }
@@ -215,6 +219,7 @@ function createEnvironment({
     downloads,
     downloadOptions,
     downloadStartTimes,
+    sessionReadKeys,
     fetchUrls,
     sentMessages,
     sidePanelCalls,
@@ -326,7 +331,7 @@ test("同一 aid 的并发点击只创建一次下载并通知全部标签", asy
   assert.equal(env.local.wnacgStateV1.updates[0].downloadMethod, "quick");
 });
 
-test("不同标签页的下载共享全局一秒启动间隔", async () => {
+test("不同标签页的普通漫画下载不互相等待一秒", async () => {
   const env = createEnvironment();
   await importBackground("global-download-start-spacing");
   const [first, second] = await Promise.all([
@@ -336,19 +341,49 @@ test("不同标签页的下载共享全局一秒启动间隔", async () => {
   assert.equal(first.state, "downloading");
   assert.equal(second.state, "downloading");
   assert.equal(env.downloadCalls, 2);
-  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] >= 1_000,
-    "两次 Chrome 下载调用必须至少相隔一秒");
+  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] < 500,
+    "普通漫画不应受合集子话的间隔影响");
 });
 
-test("后台重启后沿用 session 中的下载间隔", async () => {
+test("合集只间隔自身子话，不阻挡另一个普通漫画按钮", async () => {
+  const sourceAid = "390900";
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      items: [
+        { aid: "390901", title: "独立合集 1話" },
+        { aid: "390902", title: "独立合集 2話" }
+      ],
+      total: 2,
+      limit: 30
+    }
+  });
+  await importBackground("collection-local-spacing-only");
+  const [collectionResult, singleResult] = await Promise.all([
+    env.send(sourceAid, 24, undefined, "独立合集", true),
+    env.send("386234", 25)
+  ]);
+  assert.equal(collectionResult.state, "downloading");
+  assert.equal(singleResult.state, "downloading");
+  const firstChapter = env.downloadOptions.findIndex((item) => item.url.includes("/390901/"));
+  const secondChapter = env.downloadOptions.findIndex((item) => item.url.includes("/390902/"));
+  const ordinary = env.downloadOptions.findIndex((item) => item.url.includes("test-386234.zip"));
+  assert.ok([firstChapter, secondChapter, ordinary].every((index) => index >= 0));
+  assert.ok(Math.abs(env.downloadStartTimes[ordinary] - env.downloadStartTimes[firstChapter]) < 500,
+    "普通漫画应与合集第一话独立启动");
+  assert.ok(env.downloadStartTimes[secondChapter] - env.downloadStartTimes[firstChapter] >= 1_000,
+    "合集第二话须与第一话至少间隔一秒");
+});
+
+test("旧版 session 全局时间戳不再阻挡普通漫画下载", async () => {
   const env = createEnvironment();
-  const allowedAt = Date.now() + 1_000;
-  env.session.wnacgNextDownloadStartAt = allowedAt;
+  env.session.wnacgNextDownloadStartAt = Date.now() + 30_000;
   await importBackground("restored-download-start-spacing");
   const result = await env.send("386233", 23);
   assert.equal(result.state, "downloading");
-  assert.ok(env.downloadStartTimes[0] >= allowedAt,
-    "持久化的下次启动时间应在后台重启后生效");
+  assert.equal(env.downloadCalls, 1);
+  assert.ok(!env.sessionReadKeys.includes("wnacgNextDownloadStartAt"),
+    "普通漫画不得读取旧版全局等待时间");
 });
 
 test("普通漫画完成后再次点击会重新下载并保留前次记录", async () => {
@@ -487,8 +522,8 @@ test("首选文件名被 Chrome 拒绝时保留漫画目录并用 aid 文件名�
   const result = await env.send("386244", 55);
   assert.equal(result.state, "downloading");
   assert.equal(env.downloadCalls, 2);
-  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] >= 1_000,
-    "文件名回退也应经过同一下载启动队列");
+  assert.ok(env.downloadStartTimes[1] - env.downloadStartTimes[0] < 500,
+    "同一话的文件名回退不应额外等待一秒");
   assert.equal(env.downloadOptions[0].filename, "测试漫画/测试漫画 386244話.zip");
   assert.equal(env.downloadOptions[1].filename, "测试漫画/wnacg-386244.zip");
   assert.equal(env.local.wnacgStateV1.quickDownloads[0].relativePath, "测试漫画/wnacg-386244.zip");
