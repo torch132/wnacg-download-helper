@@ -19,6 +19,7 @@ const ACTIVE_KEY = "wnacgQuickDownloads";
 const FILENAME_PATHS_KEY = "wnacgFilenamePaths";
 const REQUEST_TIMEOUT_MS = 20_000;
 const COLLECTION_CHAPTER_INTERVAL_MS = 1_000;
+const COLLECTION_ALARM_PREFIX = "wnacg-collection:";
 const MAX_RELATIVE_PATH_BYTES = 240;
 const MAX_FOLDER_BYTES = 80;
 const MAX_FILE_BASE_BYTES = 180;
@@ -26,6 +27,8 @@ const startFlights = new Map();
 const activeMemory = new Map();
 const finishPromises = new Map();
 const setupPromises = new Map();
+const collectionAdvances = new Map();
+const collectionTimers = new Map();
 const desiredPathsByUrl = new Map();
 const desiredPathsByDownloadId = new Map();
 let stateWriteQueue = Promise.resolve();
@@ -247,7 +250,7 @@ function isInvalidFilenameError(error) {
   return /invalid[ _-]?filename/iu.test(error?.message || String(error || ""));
 }
 
-async function createChromeDownload(zipUrl, relativePath, onStarted) {
+async function createChromeDownload(zipUrl, relativePath) {
   await rememberFilenamePath(zipUrl, relativePath);
   try {
     const downloadPromise = chrome.downloads.download({
@@ -256,7 +259,6 @@ async function createChromeDownload(zipUrl, relativePath, onStarted) {
       conflictAction: "uniquify",
       saveAs: false
     });
-    onStarted?.(Date.now());
     const downloadId = await downloadPromise;
     if (!Number.isInteger(downloadId)) {
       throw new Error("Chrome 未能创建下载任务。");
@@ -382,7 +384,7 @@ function aggregateSourceState(records) {
     ...records.map((record) => Number(record.collectionTotal) || 1)
   );
   const completed = records.filter((record) => record.status === "downloaded").length;
-  if (records.some((record) => record.status === "downloading")) {
+  if (records.some((record) => ["queued", "starting", "downloading"].includes(record.status))) {
     return { state: "downloading", completed, total: expectedTotal };
   }
   if (
@@ -397,6 +399,13 @@ function aggregateSourceState(records) {
 async function subscribeFlight(flight, tabId) {
   if (!Number.isInteger(tabId)) return;
   flight.tabIds.add(tabId);
+  await mutateAppState((state) => {
+    for (const record of state.quickDownloads) {
+      if (sourceAidFor(record) === flight.aid && record.batchId === flight.batchId) {
+        record.tabIds = mergeTabIds(record.tabIds, flight.tabIds);
+      }
+    }
+  });
   if (flight.metadatas.size === 0) return;
   for (const [downloadId, metadata] of flight.metadatas) {
     metadata.tabIds = mergeTabIds(metadata.tabIds, flight.tabIds);
@@ -408,6 +417,118 @@ async function subscribeFlight(flight, tabId) {
       if (item) item.tabIds = metadata.tabIds;
     }
   });
+}
+
+async function subscribeCollectionBatch(records, tabId) {
+  if (!Number.isInteger(tabId)) return;
+  const { sourceAid, batchId } = records[0];
+  await mutateAppState((state) => {
+    for (const record of state.quickDownloads) {
+      if (sourceAidFor(record) === String(sourceAid) && record.batchId === batchId) {
+        record.tabIds = mergeTabIds(record.tabIds, [tabId]);
+      }
+    }
+  });
+  await mutateActiveDownloads((active) => {
+    for (const [id, metadata] of Object.entries(active)) {
+      if (sourceAidFor(metadata) !== String(sourceAid) || metadata.batchId !== batchId) continue;
+      metadata.tabIds = mergeTabIds(metadata.tabIds, [tabId]);
+      if (activeMemory.has(Number(id))) activeMemory.get(Number(id)).tabIds = metadata.tabIds;
+    }
+  });
+}
+
+function collectionQueueKey(sourceAid, batchId) {
+  return `${sourceAid}:${batchId}`;
+}
+
+function scheduleCollectionAdvance(sourceAid, batchId, readyAt) {
+  const key = collectionQueueKey(sourceAid, batchId);
+  clearTimeout(collectionTimers.get(key));
+  const delay = Math.max(0, Number(readyAt || 0) - Date.now());
+  const timer = setTimeout(() => {
+    collectionTimers.delete(key);
+    void advanceCollectionBatch(sourceAid, batchId).catch((error) =>
+      console.error("wnACG 合集队列推进失败", error)
+    );
+  }, delay);
+  collectionTimers.set(key, timer);
+  // MV3 worker 可能在短定时器触发前被回收；alarm 作为持久保底唤醒。
+  chrome.alarms?.create(`${COLLECTION_ALARM_PREFIX}${key}`, {
+    when: Math.max(Date.now() + 30_000, Number(readyAt || 0))
+  });
+}
+
+function advanceCollectionBatch(sourceAid, batchId) {
+  const key = collectionQueueKey(sourceAid, batchId);
+  if (collectionAdvances.has(key)) return collectionAdvances.get(key);
+  const operation = runCollectionAdvance(sourceAid, batchId).finally(() => {
+    collectionAdvances.delete(key);
+  });
+  collectionAdvances.set(key, operation);
+  return operation;
+}
+
+async function runCollectionAdvance(sourceAid, batchId) {
+  const state = await loadAppState();
+  const records = recordsForSource(state.quickDownloads, sourceAid, batchId);
+  if (records.some((record) => ["starting", "downloading", "failed", "paused"].includes(record.status))) return;
+  const next = records.find((record) => record.status === "queued");
+  if (!next) return;
+  const readyAt = Number(next.readyAt || 0);
+  if (readyAt > Date.now()) {
+    scheduleCollectionAdvance(sourceAid, batchId, readyAt);
+    return;
+  }
+
+  await mutateAppState((latest) => {
+    const current = latest.quickDownloads.find((record) => sameQuickTask(record, next));
+    if (current?.status === "queued") {
+      current.status = "starting";
+      current.startingAt = new Date().toISOString();
+    }
+  });
+  const flight = {
+    batchId,
+    tabIds: new Set(mergeTabIds(...records.map((record) => record.tabIds))),
+    metadatas: new Map()
+  };
+  try {
+    await startDownloadItem({
+      item: next,
+      manifest: { sourceAid, total: next.collectionTotal, isCollection: true },
+      request: { title: next.sourceTitle },
+      comicName: next.comicName,
+      flight
+    });
+  } catch (error) {
+    await markStartFailure(next, next.comicName,
+      { sourceAid, total: next.collectionTotal }, batchId, error);
+    await pauseCollectionQueue(sourceAid, batchId, readableDownloadException(error));
+  }
+}
+
+async function pauseCollectionQueue(sourceAid, batchId, reason) {
+  const latest = await mutateAppState((state) => {
+    for (const record of state.quickDownloads) {
+      if (sourceAidFor(record) === String(sourceAid) && record.batchId === batchId &&
+          record.status === "queued") {
+        record.status = "paused";
+        record.error = `前一话下载失败，剩余话数未启动：${reason}`;
+      }
+    }
+  });
+  const records = recordsForSource(latest.quickDownloads, sourceAid, batchId);
+  const aggregate = aggregateSourceState(records);
+  const tabIds = mergeTabIds(...records.map((record) => record.tabIds));
+  for (const tabId of tabIds) {
+    await chrome.tabs.sendMessage(tabId, {
+      type: QUICK_DOWNLOAD_STATUS,
+      aid: String(sourceAid),
+      state: "error",
+      message: `合集下载已暂停，已完成 ${aggregate.completed}/${aggregate.total}；再次点击会重新下载全话。`
+    }).catch(() => {});
+  }
 }
 
 async function handleQuickDownload(message, sender) {
@@ -424,7 +545,6 @@ async function handleQuickDownload(message, sender) {
     batchId: crypto.randomUUID(),
     tabIds: new Set(),
     metadatas: new Map(),
-    lastCollectionDownloadStartedAt: null,
     promise: null
   };
   startFlights.set(request.aid, flight);
@@ -437,6 +557,14 @@ async function handleQuickDownload(message, sender) {
 
 async function startQuickDownload(request, flight) {
   await ensureRecovery();
+  const currentState = await loadAppState();
+  const currentRecords = recordsForSource(currentState.quickDownloads, request.aid);
+  if (currentRecords.some((record) =>
+    record.isCollection && ["queued", "starting", "downloading"].includes(record.status)
+  )) {
+    for (const tabId of flight.tabIds) await subscribeCollectionBatch(currentRecords, tabId);
+    return { ok: true, state: "downloading", message: "该合集正在逐话下载。" };
+  }
   const manifest = await resolveDownloadItems(request);
   const initialState = await loadAppState();
   const comicName = comicNameFor(
@@ -461,22 +589,30 @@ async function startQuickDownload(request, flight) {
         comicName,
         collectionTotal: manifest.total,
         downloadMethod: "quick",
-        status: "downloading",
+        status: manifest.isCollection ? "queued" : "downloading",
+        tabIds: mergeTabIds(flight.tabIds),
         startedAt: now,
         error: null
       })));
   });
 
+  if (manifest.isCollection) {
+    await advanceCollectionBatch(manifest.sourceAid, flight.batchId);
+    const latestState = await loadAppState();
+    const aggregate = aggregateSourceState(
+      recordsForSource(latestState.quickDownloads, manifest.sourceAid, flight.batchId)
+    );
+    return {
+      ok: aggregate.state !== "error",
+      state: aggregate.state,
+      message: aggregate.state === "error"
+        ? "合集下载已暂停，再次点击可重新下载全话。"
+        : `合集正在逐话下载（共 ${aggregate.total} 个文件）。`
+    };
+  }
+
   const results = [];
   for (const item of manifest.items) {
-    if (manifest.isCollection && flight.lastCollectionDownloadStartedAt) {
-      // 只限制同一合集的相邻子话；普通漫画和其他按钮不共用等待时间。
-      const waitMs = Math.max(0, Math.min(
-        COLLECTION_CHAPTER_INTERVAL_MS,
-        flight.lastCollectionDownloadStartedAt + COLLECTION_CHAPTER_INTERVAL_MS - Date.now()
-      ));
-      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
     try {
       results.push(await startDownloadItem({
         item,
@@ -529,18 +665,15 @@ async function startQuickDownload(request, flight) {
 async function startDownloadItem({ item, manifest, request, comicName, flight }) {
   let relativePath = buildRelativePath(comicName, item.title || request.title, item.downloadAid);
   let downloadId;
-  const noteStart = manifest.isCollection
-    ? (startedAt) => { flight.lastCollectionDownloadStartedAt = startedAt; }
-    : null;
   try {
-    downloadId = await createChromeDownload(item.zipUrl, relativePath, noteStart);
+    downloadId = await createChromeDownload(item.zipUrl, relativePath);
   } catch (error) {
     if (!isInvalidFilenameError(error)) throw error;
     // 首选标题仍被 Chrome 拒绝时，保留漫画目录并改用只含 aid 的安全文件名重试。
     const fallbackPath = buildRelativePath(comicName, `wnacg-${item.downloadAid}`, item.downloadAid);
     if (fallbackPath === relativePath) throw error;
     relativePath = fallbackPath;
-    downloadId = await createChromeDownload(item.zipUrl, relativePath, noteStart);
+    downloadId = await createChromeDownload(item.zipUrl, relativePath);
   }
   desiredPathsByDownloadId.set(downloadId, relativePath);
 
@@ -744,6 +877,21 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
           : `一键下载失败“${metadata.title}”：${finalError || "未知原因"}`
       );
     }
+    if (metadata.isCollection) {
+      const queue = state.quickDownloads.filter((item) =>
+        sourceAidFor(item) === sourceAidFor(metadata) && item.batchId === metadata.batchId
+      );
+      const next = queue.find((item) => item.status === "queued");
+      if (next && completed) {
+        // 从前一话真正结束的时刻起等待一秒，而非从创建 Chrome 任务起计时。
+        next.readyAt = Date.now() + COLLECTION_CHAPTER_INTERVAL_MS;
+      } else if (!completed) {
+        for (const item of queue.filter((entry) => entry.status === "queued")) {
+          item.status = "paused";
+          item.error = `前一话下载失败，剩余话数未启动：${finalError}`;
+        }
+      }
+    }
   });
 
   const aggregate = aggregateSourceState(
@@ -782,6 +930,12 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
   await mutateActiveDownloads((latest) => {
     delete latest[String(downloadId)];
   });
+  if (metadata.isCollection && completed) {
+    const next = recordsForSource(
+      latestState.quickDownloads, sourceAidFor(metadata), metadata.batchId
+    ).find((item) => item.status === "queued");
+    if (next) scheduleCollectionAdvance(sourceAidFor(metadata), metadata.batchId, next.readyAt);
+  }
   return {
     ok: completed,
     state: aggregate.state === "downloading"
@@ -797,7 +951,7 @@ async function markRecoveryFailure(record, reason) {
     const current = state.quickDownloads.find(
       (item) => sameQuickTask(item, record)
     );
-    if (!current || current.status !== "downloading") return;
+    if (!current || !["downloading", "starting"].includes(current.status)) return;
     current.status = "failed";
     current.failedAt = new Date().toISOString();
     current.error = reason;
@@ -829,6 +983,15 @@ async function recoverQuickDownloads() {
     });
   }
 
+  // 创建任务到保存下载 ID 之间若 worker 重启，不能盲目重提交同一 ZIP。
+  for (const record of state.quickDownloads.filter((item) => item.status === "starting")) {
+    await markRecoveryFailure(record, "下载启动时后台重启，无法安全确认任务编号；请重新点击合集按钮。");
+    if (record.isCollection) {
+      await pauseCollectionQueue(sourceAidFor(record), record.batchId,
+        "下载启动状态无法确认");
+    }
+  }
+
   for (const [downloadId, metadata] of records) {
     activeMemory.set(downloadId, metadata);
     if (metadata.relativePath) {
@@ -856,6 +1019,16 @@ async function recoverQuickDownloads() {
         item?.error || "浏览器重启后未找到下载任务"
       );
     }
+  }
+  const recovered = await loadAppState();
+  const latestCollections = new Map();
+  for (const record of recovered.quickDownloads) {
+    if (record.isCollection && record.batchId) {
+      latestCollections.set(sourceAidFor(record), record.batchId);
+    }
+  }
+  for (const [sourceAid, batchId] of latestCollections) {
+    await advanceCollectionBatch(sourceAid, batchId);
   }
 }
 
@@ -919,7 +1092,19 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 chrome.downloads.onChanged.addListener((delta) => {
   const stateName = delta.state?.current;
   if (stateName === "complete" || stateName === "interrupted") {
-    void finishDownload(delta.id, stateName, delta.error?.current);
+    void finishDownload(delta.id, stateName, delta.error?.current).catch((error) =>
+      console.error("wnACG 下载终态处理失败", error)
+    );
+  }
+});
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (!alarm.name?.startsWith(COLLECTION_ALARM_PREFIX)) return;
+  const [sourceAid, batchId] = alarm.name.slice(COLLECTION_ALARM_PREFIX.length).split(":");
+  if (sourceAid && batchId) {
+    void advanceCollectionBatch(sourceAid, batchId).catch((error) =>
+      console.error("wnACG 合集恢复失败", error)
+    );
   }
 });
 

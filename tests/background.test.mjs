@@ -49,6 +49,7 @@ function createEnvironment({
   const sessionReadKeys = [];
   let messageListener;
   let changedListener;
+  let alarmListener;
   let determiningFilenameListener;
   let downloadCalls = 0;
   const downloadStartTimes = [];
@@ -57,6 +58,7 @@ function createEnvironment({
   const downloadOptions = [];
   const fetchUrls = [];
   const sidePanelCalls = [];
+  const alarms = [];
   let libraryPermissionQueries = 0;
 
   delete globalThis.indexedDB;
@@ -131,6 +133,16 @@ function createEnvironment({
     sidePanel: {
       async setPanelBehavior(options) {
         sidePanelCalls.push(structuredClone(options));
+      }
+    },
+    alarms: {
+      create(name, options) {
+        alarms.push({ name, options: structuredClone(options) });
+      },
+      onAlarm: {
+        addListener(listener) {
+          alarmListener = listener;
+        }
       }
     },
     downloads: {
@@ -223,6 +235,7 @@ function createEnvironment({
     fetchUrls,
     sentMessages,
     sidePanelCalls,
+    alarms,
     get downloadCalls() {
       return downloadCalls;
     },
@@ -263,6 +276,9 @@ function createEnvironment({
     },
     change(delta) {
       changedListener(delta);
+    },
+    fireAlarm(name) {
+      alarmListener({ name });
     }
   };
 }
@@ -273,11 +289,26 @@ async function importBackground(label) {
 }
 
 async function waitFor(predicate, message) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(message);
+}
+
+async function finishChapter(env, id, state = "complete", error = null) {
+  await waitFor(() => env.downloads.has(id), `下载任务 ${id} 应在前一话结束后创建`);
+  env.downloads.get(id).state = state;
+  env.change({ id, state: { current: state }, ...(error ? { error: { current: error } } : {}) });
+  await waitFor(() => env.local.wnacgStateV1.quickDownloads.some((item) =>
+    item.downloadId === id && ["downloaded", "failed"].includes(item.status)),
+  `下载任务 ${id} 应完成终态处理`);
+}
+
+async function finishChapters(env, firstId, count) {
+  for (let id = firstId; id < firstId + count; id += 1) {
+    await finishChapter(env, id);
+  }
 }
 
 test("同一 aid 的并发点击只创建一次下载并通知全部标签", async () => {
@@ -366,13 +397,17 @@ test("合集只间隔自身子话，不阻挡另一个普通漫画按钮", async
   assert.equal(collectionResult.state, "downloading");
   assert.equal(singleResult.state, "downloading");
   const firstChapter = env.downloadOptions.findIndex((item) => item.url.includes("/390901/"));
-  const secondChapter = env.downloadOptions.findIndex((item) => item.url.includes("/390902/"));
   const ordinary = env.downloadOptions.findIndex((item) => item.url.includes("test-386234.zip"));
-  assert.ok([firstChapter, secondChapter, ordinary].every((index) => index >= 0));
+  assert.ok([firstChapter, ordinary].every((index) => index >= 0));
+  assert.equal(env.downloadCalls, 2, "第一话未结束时不得创建第二话");
   assert.ok(Math.abs(env.downloadStartTimes[ordinary] - env.downloadStartTimes[firstChapter]) < 500,
     "普通漫画应与合集第一话独立启动");
-  assert.ok(env.downloadStartTimes[secondChapter] - env.downloadStartTimes[firstChapter] >= 1_000,
-    "合集第二话须与第一话至少间隔一秒");
+  const finishedAt = Date.now();
+  await finishChapter(env, 901 + firstChapter);
+  await waitFor(() => env.downloadCalls === 3, "首话结束后应启动第二话");
+  assert.ok(env.downloadStartTimes[2] - finishedAt >= 1_000,
+    "合集第二话须在第一话结束至少一秒后启动");
+  await finishChapter(env, 903);
 });
 
 test("旧版 session 全局时间戳不再阻挡普通漫画下载", async () => {
@@ -736,6 +771,53 @@ test("浏览器重启后合集子任务独立恢复且父记录最终全部完�
   );
 });
 
+test("后台重启时保留合集队列，活动 ZIP 未结束前不提交下一话", async () => {
+  const sourceAid = "390950";
+  const batchId = "restart-batch";
+  const firstId = 776;
+  const first = {
+    aid: "390951", downloadAid: "390951", sourceAid,
+    recordKey: `bundle:${sourceAid}:390951`, batchId,
+    title: "恢复队列 1話", sourceTitle: "恢复队列", comicName: "恢复队列",
+    zipUrl: "https://dl1.wn01.download/down/390951/390951.zip",
+    isCollection: true, collectionTotal: 2,
+    relativePath: "恢复队列/恢复队列 1話.zip",
+    status: "downloading", downloadId: firstId, tabIds: [78]
+  };
+  const second = {
+    aid: "390952", downloadAid: "390952", sourceAid,
+    recordKey: `bundle:${sourceAid}:390952`, batchId,
+    title: "恢复队列 2話", sourceTitle: "恢复队列", comicName: "恢复队列",
+    zipUrl: "https://dl1.wn01.download/down/390952/390952.zip",
+    isCollection: true, collectionTotal: 2,
+    status: "queued", tabIds: [78]
+  };
+  const env = createEnvironment({
+    localState: {
+      version: 1, watches: [], updates: [],
+      quickDownloads: [first, second], activity: [], lastScanAt: null
+    },
+    initialDownloads: new Map([[firstId, {
+      id: firstId, state: "in_progress", url: first.zipUrl,
+      finalUrl: first.zipUrl,
+      filename: `/Users/tester/Downloads/${first.relativePath}`,
+      mime: "application/zip", fileSize: 64, exists: true
+    }]])
+  });
+  await importBackground("collection-queued-recovery");
+  assert.equal(env.downloadCalls, 0, "已有活动下载时不得再次创建子任务");
+  const repeat = await env.send(sourceAid, 78, undefined, "恢复队列", true);
+  assert.equal(repeat.state, "downloading");
+  assert.equal(env.downloadCalls, 0, "重启后重复点击不应开启新批次");
+  const finishedAt = Date.now();
+  await finishChapter(env, firstId);
+  await waitFor(() => env.downloadCalls === 1, "恢复后应按顺序创建第二话");
+  assert.ok(env.downloadStartTimes[0] - finishedAt >= 1_000);
+  await finishChapter(env, 901);
+  await waitFor(() => env.sentMessages.at(-1)?.message.state === "complete",
+    "恢复队列最终应通知完成");
+});
+
 test("精确主页允许一键下载，但详情页与伪造主机仍被拒绝", async () => {
   const env = createEnvironment();
   await importBackground("homepage-source");
@@ -776,15 +858,11 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
     true
   );
   assert.equal(result.state, "downloading");
-  assert.equal(env.downloadCalls, 3);
-  assert.ok(env.downloadStartTimes.every((time, index, times) =>
-    index === 0 || time - times[index - 1] >= 1_000),
-  "合集相邻子话至少间隔一秒启动");
-  assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
-    "朋友的媽媽 外傳/朋友的媽媽 外傳1-3話.zip",
-    "朋友的媽媽 外傳/朋友的媽媽 外傳4-5話.zip",
-    "朋友的媽媽 外傳/朋友的媽媽 外傳6-7話.zip"
-  ]);
+  assert.equal(env.downloadCalls, 1, "第一话未完成时不得提交后续话数");
+  const repeated = await env.send(sourceAid, 62, undefined, "朋友的媽媽 外傳", true);
+  assert.equal(repeated.state, "downloading");
+  assert.equal(env.downloadCalls, 1, "下载中的重复点击应复用同一批次");
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 3);
   assert.deepEqual(
     env.local.wnacgStateV1.quickDownloads.map((item) => ({
       recordKey: item.recordKey,
@@ -792,27 +870,37 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
       aid: item.aid,
       status: item.status
     })),
-    items.map((item) => ({
+    items.map((item, index) => ({
       recordKey: `bundle:${sourceAid}:${item.aid}`,
       sourceAid,
       aid: item.aid,
-      status: "downloading"
+      status: index === 0 ? "downloading" : "queued"
     }))
   );
-
-  for (const downloadId of [901, 902]) {
-    env.downloads.get(downloadId).state = "complete";
-    env.change({ id: downloadId, state: { current: "complete" } });
-  }
+  await finishChapter(env, 901);
+  assert.equal(env.downloadCalls, 1, "终态处理后仍须等待一秒");
+  assert.ok(env.alarms.length > 0, "后台回收后需要 alarm 保底唤醒");
+  env.fireAlarm(env.alarms.at(-1).name);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(env.downloadCalls, 1, "提前触发 alarm 也不得越过一秒间隔");
+  await finishChapter(env, 902);
   await waitFor(
     () => env.local.wnacgStateV1.quickDownloads.filter((item) => item.status === "downloaded").length === 2,
     "前两个合集子项应分别完成"
   );
   assert.equal(env.sentMessages.length, 0, "合集未全部完成时不应把父按钮标成完成");
 
-  env.downloads.get(903).state = "complete";
-  env.change({ id: 903, state: { current: "complete" } });
-  await waitFor(() => env.sentMessages.length === 1, "合集全部完成后应通知父按钮");
+  await finishChapter(env, 903);
+  assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
+    "朋友的媽媽 外傳/朋友的媽媽 外傳1-3話.zip",
+    "朋友的媽媽 外傳/朋友的媽媽 外傳4-5話.zip",
+    "朋友的媽媽 外傳/朋友的媽媽 外傳6-7話.zip"
+  ]);
+  assert.ok(env.downloadStartTimes.every((time, index, times) =>
+    index === 0 || time - times[index - 1] >= 1_000),
+  "合集相邻子话至少间隔一秒启动");
+  await waitFor(() => env.sentMessages.length === 2, "合集全部完成后应通知两个标签");
+  assert.deepEqual(env.sentMessages.map((entry) => entry.tabId).sort(), [61, 62]);
   assert.equal(env.sentMessages[0].message.aid, sourceAid);
   assert.equal(env.sentMessages[0].message.state, "complete");
   assert.match(env.sentMessages[0].message.message, /3 个文件/);
@@ -844,7 +932,8 @@ test("卡片标注合集而下载页缺少章节容器时，从接口补齐全�
 
   const result = await env.send(sourceAid, 70, undefined, "合集测试", true);
   assert.equal(result.state, "downloading");
-  assert.equal(env.downloadCalls, 3);
+  assert.equal(env.downloadCalls, 1);
+  await finishChapters(env, 901, 3);
   assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
     "合集测试/合集测试 1話.zip",
     "合集测试/合集测试 2話.zip",
@@ -1088,12 +1177,9 @@ test("连载合集再次点击时重新下载当前全部子章节", async () =>
 
   const first = await env.send(sourceAid, 66, undefined, "连载合集", false);
   assert.equal(first.state, "downloading", "下载页结构应覆盖缺失的卡片合集标签");
-  assert.equal(env.downloadCalls, 7);
+  assert.equal(env.downloadCalls, 1);
   assert.ok(env.fetchUrls.some((url) => url.includes(`sid=${sourceAid}&page=1`)));
-  for (let id = 901; id <= 907; id += 1) {
-    env.downloads.get(id).state = "complete";
-    env.change({ id, state: { current: "complete" } });
-  }
+  await finishChapters(env, 901, 7);
   await waitFor(() => env.sentMessages.at(-1)?.message.state === "complete",
     "七话完成后父按钮应显示完成");
 
@@ -1103,6 +1189,8 @@ test("连载合集再次点击时重新下载当前全部子章节", async () =>
   collection.pages[1] = chapterPage([...items, eighth]);
   const second = await env.send(sourceAid, 66, undefined, "连载合集", false);
   assert.equal(second.state, "downloading");
+  assert.equal(env.downloadCalls, 8, "新批次同样只启动第一话");
+  await finishChapters(env, 908, 8);
   assert.equal(env.downloadCalls, 15, "再次点击应下载当前全部八话");
   assert.equal(env.downloadOptions.at(-1).filename, "连载合集/连载合集 8話.zip");
   assert.equal(env.local.wnacgStateV1.quickDownloads.length, 15,
@@ -1126,16 +1214,14 @@ test("合集部分失败后再次点击仍重新下载全部子项", async () =>
 
   const first = await env.send(sourceAid, 62, undefined, "重试合集", true);
   assert.equal(first.state, "downloading");
-  assert.equal(env.downloadCalls, 3);
-  const failed = env.local.wnacgStateV1.quickDownloads.find(
+  assert.equal(env.downloadCalls, 1);
+  await finishChapter(env, 901);
+  await waitFor(() => env.downloadCalls === 2, "第一话完成后应尝试第二话");
+  await waitFor(() => env.local.wnacgStateV1.quickDownloads.find(
     (item) => item.recordKey === `bundle:${sourceAid}:220002`
-  );
-  assert.equal(failed.status, "failed");
-
-  for (const downloadId of [901, 903]) {
-    env.downloads.get(downloadId).state = "complete";
-    env.change({ id: downloadId, state: { current: "complete" } });
-  }
+  )?.status === "failed", "第二话创建失败应被记录");
+  assert.equal(env.downloadCalls, 2, "网络失败后不应继续提交第三话");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[2].status, "paused");
   await waitFor(
     () => env.sentMessages.at(-1)?.message.state === "error",
     "其余子项结束后父按钮应显示可重试错误"
@@ -1143,13 +1229,11 @@ test("合集部分失败后再次点击仍重新下载全部子项", async () =>
 
   const retry = await env.send(sourceAid, 62, undefined, "重试合集", true);
   assert.equal(retry.state, "downloading");
-  assert.equal(env.downloadCalls, 6, "再次点击应为三话都创建新任务");
-  assert.deepEqual(env.downloadOptions.slice(3).map((item) => item.filename),
+  assert.equal(env.downloadCalls, 3);
+  await finishChapters(env, 903, 3);
+  assert.equal(env.downloadCalls, 5, "再次点击应为三话都创建新任务");
+  assert.deepEqual(env.downloadOptions.slice(2).map((item) => item.filename),
     items.map((item) => `重试合集/${item.title}.zip`));
-  for (const downloadId of [904, 905, 906]) {
-    env.downloads.get(downloadId).state = "complete";
-    env.change({ id: downloadId, state: { current: "complete" } });
-  }
   await waitFor(
     () => env.sentMessages.at(-1)?.message.state === "complete",
     "失败子项重试成功后父按钮应完成"
@@ -1192,12 +1276,15 @@ test("超过 30 话的合集会读取分页接口并下载完整清单", async (
 
   const result = await env.send(sourceAid, 63, undefined, "分页合集", true);
   assert.equal(result.state, "downloading");
-  assert.equal(env.downloadCalls, 31);
+  assert.equal(env.downloadCalls, 1, "分页合集也只允许一个进行中的 ZIP");
   assert.equal(
     env.fetchUrls[1],
     `https://www.wnacg.com/?ctl=download&act=chapters&sid=${sourceAid}&page=2`
   );
-  assert.equal(env.downloadOptions.at(-1).filename, "分页合集/分页合集 31話.zip");
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 31);
+  assert.equal(env.local.wnacgStateV1.quickDownloads.at(-1).title, "分页合集 31話");
+  await finishChapter(env, 901, "interrupted", "NETWORK_FAILED");
+  assert.equal(env.downloadCalls, 1, "网络失败后不应提交其余 30 话");
 });
 
 test("合集章节清单不完整时在创建任何 Chrome 下载前终止", async () => {
