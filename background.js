@@ -6,10 +6,15 @@ import {
   parseCollectionChapterPage,
   parseDownloadItemsText,
   parseDownloadTitleText,
-  reconcileEquivalentChapterUpdates,
   sanitizeFileName,
   truncateUtf8
 } from "./core.js";
+import {
+  ensureLibraryPermission,
+  findLocalArchive,
+  getLibraryDirectoryHandle,
+  scanLocalArchiveIndex
+} from "./file-system.js";
 import { addActivity, loadAppState, updateAppState } from "./storage.js";
 
 const QUICK_DOWNLOAD = "WNACG_QUICK_DOWNLOAD";
@@ -296,8 +301,33 @@ function pathMatchesRelative(actualPath, relativePath) {
   return new RegExp(`${escaped(stem)} \\(\\d+\\)${escaped(extension)}$`, "u").test(actual);
 }
 
-async function completedQuickDownloadExists(record) {
+async function readLocalArchiveIndex(comicName) {
+  let handle;
+  try {
+    handle = await getLibraryDirectoryHandle();
+  } catch (error) {
+    if (typeof indexedDB === "undefined") return null;
+    throw new Error(`无法读取本地漫画库授权：${error?.message || error}`);
+  }
+  if (!handle) return null;
+  if (!await ensureLibraryPermission(handle, false)) {
+    throw new Error("本地漫画库权限失效，请打开侧栏重新授权后再下载。");
+  }
+  return scanLocalArchiveIndex(handle, [comicName]);
+}
+
+async function completedQuickDownloadExists(record, localIndexes = null) {
   if (record?.status !== "downloaded") return false;
+  const comicName = String(record.comicName || "");
+  if (localIndexes && !localIndexes.has(comicName)) {
+    localIndexes.set(comicName, readLocalArchiveIndex(comicName));
+  }
+  const index = await (localIndexes?.get(comicName) || readLocalArchiveIndex(comicName));
+  if (index || record.downloadMethod === "local") {
+    return Boolean(index && findLocalArchive(
+      index, record.comicName, record.title, record.downloadAid || record.aid
+    ));
+  }
   if (!pathMatchesRelative(record.actualFilePath, record.relativePath)) return false;
   if (!Number.isInteger(record.downloadId)) return true;
   try {
@@ -349,7 +379,9 @@ function sourceAidFor(record) {
 }
 
 function recordsForSource(records, sourceAid) {
-  return records.filter((record) => sourceAidFor(record) === String(sourceAid));
+  return records.filter((record) =>
+    sourceAidFor(record) === String(sourceAid) && !record.supersededByCollection
+  );
 }
 
 function aggregateSourceState(records) {
@@ -444,6 +476,7 @@ async function startQuickDownload(request, flight) {
     initialState.watches,
     manifest.officialTitle
   );
+  const localIndex = await readLocalArchiveIndex(comicName);
   const equivalentCandidate = (item) => ({ ...item, comicName,
     collectionTotal: manifest.total });
   const priorFor = (records, item) =>
@@ -455,11 +488,23 @@ async function startQuickDownload(request, flight) {
   const completedPrior = new Map();
   const activeKeys = new Set();
   for (const item of manifest.items) {
+    const localArchive = findLocalArchive(localIndex, comicName, item.title, item.downloadAid);
+    if (localArchive) {
+      completedKeys.add(item.recordKey);
+      completedPrior.set(item.recordKey, {
+        status: "downloaded",
+        downloadMethod: "local",
+        relativePath: localArchive.relativePath,
+        actualFilePath: localArchive.relativePath,
+        localFilePath: localArchive.relativePath
+      });
+      continue;
+    }
     const priorRecords = initialState.quickDownloads.filter((record) =>
       recordKeyFor(record) === item.recordKey ||
       isSameChapterAcrossCollections(record, equivalentCandidate(item))
     );
-    for (const prior of priorRecords) {
+    for (const prior of localIndex ? [] : priorRecords) {
       if (!await completedQuickDownloadExists(prior)) continue;
       completedKeys.add(item.recordKey);
       completedPrior.set(item.recordKey, prior);
@@ -506,12 +551,11 @@ async function startQuickDownload(request, flight) {
     }
     const manifestKeys = new Set(manifest.items.map((item) => item.recordKey));
     state.quickDownloads = state.quickDownloads
-      .filter((record) => manifest.isCollection
-        ? sourceAidFor(record) !== manifest.sourceAid &&
-          !manifest.items.some((item) =>
-            isSameChapterAcrossCollections(record, equivalentCandidate(item))
-          )
-        : !manifestKeys.has(recordKeyFor(record)))
+      .filter((record) => !manifestKeys.has(recordKeyFor(record)))
+      .map((record) => manifest.isCollection &&
+        sourceAidFor(record) === manifest.sourceAid
+          ? { ...record, supersededByCollection: true }
+          : record)
       .concat(manifest.items.map((item) => latestByKey.get(item.recordKey)));
   });
 
@@ -766,7 +810,6 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
             }
           : item
       );
-      state.updates = reconcileEquivalentChapterUpdates(state.updates);
     }
     if (!alreadyFinal) {
       addActivity(
@@ -907,11 +950,14 @@ async function quickDownloadStates(message, sender) {
   await ensureRecovery();
   const state = await loadAppState();
   const result = {};
+  const localIndexes = new Map();
   for (const aid of aids) {
     const records = recordsForSource(state.quickDownloads, aid);
     const aggregate = aggregateSourceState(records);
     if (aggregate.state === "complete") {
-      const existing = await Promise.all(records.map(completedQuickDownloadExists));
+      const existing = await Promise.all(records.map((record) =>
+        completedQuickDownloadExists(record, localIndexes)
+      ));
       result[aid] = existing.every(Boolean) ? "complete" : "error";
     } else if (aggregate.state !== "idle") {
       result[aid] = aggregate.state;

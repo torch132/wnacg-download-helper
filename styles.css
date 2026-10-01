@@ -127,6 +127,15 @@ input:focus-visible {
   gap: 24px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.directory-controls {
+  display: grid;
+  flex: 1 1 480px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
 }
 
 .brand-block,
@@ -194,8 +203,9 @@ h2 {
 }
 
 .directory-control {
-  justify-content: flex-end;
-  gap: 12px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -1070,6 +1080,11 @@ input[type="checkbox"] {
   .directory-control {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .directory-controls {
+    width: 100%;
+    grid-template-columns: 1fr;
   }
 
   .directory-summary {

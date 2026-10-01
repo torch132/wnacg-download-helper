@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.4");
+  assert.equal(manifest.version, "1.5.5");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -102,6 +102,8 @@ test("管理页提供所有运行时控件且不加载远程资源", async () =>
   assert.match(html, /<meta name="color-scheme" content="light dark">/);
   const requiredIds = [
     "choose-directory-btn",
+    "choose-library-btn",
+    "library-status",
     "watch-form",
     "watch-prefix-input",
     "watch-submit-btn",
@@ -121,6 +123,16 @@ test("管理页提供所有运行时控件且不加载远程资源", async () =>
   }
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]+(?:src|href)=["']https?:/i);
   assert.match(html, /<script type="module" src="app\.js"><\/script>/);
+});
+
+test("侧栏以本地 ZIP 核对待下载项，原始进度只做显示折叠", async () => {
+  const app = await read("app.js");
+  assert.match(app, /scanLocalArchiveIndex\(/);
+  assert.match(app, /findLocalArchive\(/);
+  assert.match(app, /findLocalArchive: localArchiveFor/g);
+  assert.match(app, /function visibleUpdates\(\)\s*\{\s*return reconcileEquivalentChapterUpdates\(state\.updates\)/s);
+  assert.doesNotMatch(app, /state\.updates\s*=\s*reconcileEquivalentChapterUpdates\(state\.updates\)/);
+  assert.doesNotMatch(app, /state\.updates = state\.updates\.filter\(\(item\) => item\.watchId !== id\)/);
 });
 
 test("界面使用 Catppuccin Latte 和 Mocha 自动亮暗主题", async () => {

@@ -19,17 +19,30 @@
           </div>
         </div>
 
-        <div class="directory-control" aria-labelledby="directory-label">
-          <span id="directory-label" class="control-label">保存目录</span>
-          <div class="directory-summary">
-            <span id="directory-indicator" class="status-dot is-offline" aria-hidden="true"></span>
-            <span id="directory-status" class="directory-status" role="status">尚未授权</span>
-            <span id="directory-name" class="directory-path" title="未选择目录">未选择目录</span>
+        <div class="directory-controls">
+          <div class="directory-control" aria-labelledby="library-label">
+            <span id="library-label" class="control-label">本地漫画库 · 查重</span>
+            <div class="directory-summary">
+              <span id="library-indicator" class="status-dot is-offline" aria-hidden="true"></span>
+              <span id="library-status" class="directory-status" role="status">尚未授权</span>
+              <span id="library-name" class="directory-path" title="请选择包含漫画名子目录的根目录">未选择目录</span>
+            </div>
+            <button id="choose-library-btn" class="button button-secondary" type="button" title="选择包含漫画名子目录的根目录，例如 Downloads">
+              选择漫画库
+            </button>
           </div>
-          <button id="choose-directory-btn" class="button button-secondary" type="button">
-            <span class="button-icon" aria-hidden="true">⌁</span>
-            选择目录
-          </button>
+          <div class="directory-control" aria-labelledby="directory-label">
+            <span id="directory-label" class="control-label">保存目录</span>
+            <div class="directory-summary">
+              <span id="directory-indicator" class="status-dot is-offline" aria-hidden="true"></span>
+              <span id="directory-status" class="directory-status" role="status">尚未授权</span>
+              <span id="directory-name" class="directory-path" title="未选择目录">未选择目录</span>
+            </div>
+            <button id="choose-directory-btn" class="button button-secondary" type="button">
+              <span class="button-icon" aria-hidden="true">⌁</span>
+              选择目录
+            </button>
+          </div>
         </div>
       </header>
 

@@ -77,12 +77,8 @@ function compactState(state) {
 }
 
 function compactQuickDownloads(records) {
-  const active = records.filter((item) => ["downloading", "failed"].includes(item.status));
-  const history = records
-    .filter((item) => item.status === "downloaded")
-    .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
-    .slice(0, 500);
-  return [...active, ...history];
+  // 一键下载历史也属于用户记录，不能因为数量超过固定阈值而被静默丢弃。
+  return records;
 }
 
 export function addActivity(state, level, message) {
@@ -96,12 +92,6 @@ export function addActivity(state, level, message) {
 }
 
 function compactUpdates(updates) {
-  const actionable = updates.filter((item) =>
-    ["pending", "downloading", "failed"].includes(item.status)
-  );
-  const history = updates
-    .filter((item) => ["downloaded", "ignored"].includes(item.status))
-    .sort((a, b) => String(b.detectedAt).localeCompare(String(a.detectedAt)))
-    .slice(0, 500);
-  return [...actionable, ...history];
+  // 更新记录属于用户历史数据，不因展示或存储压缩而截断。
+  return updates;
 }

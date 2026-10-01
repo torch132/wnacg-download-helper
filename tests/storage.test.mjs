@@ -79,3 +79,33 @@ test("弹窗陈旧快照保存时合并后台新增活动", async () => {
     ["background", "old"]
   );
 });
+
+test("保存状态不会截断超过 500 条的原有章节记录", async () => {
+  let persisted = { wnacgStateV1: {
+    version: 1, watches: [], quickDownloads: [], activity: [], lastScanAt: null,
+    updates: Array.from({ length: 601 }, (_, index) => ({
+      aid: String(index + 1), status: "downloaded", detectedAt: "2026-09-01"
+    }))
+  } };
+  globalThis.chrome = { storage: { local: {
+    get: async () => structuredClone(persisted),
+    set: async (value) => { persisted = structuredClone(value); }
+  } } };
+  await storage.saveAppState(await storage.loadAppState());
+  assert.equal(persisted.wnacgStateV1.updates.length, 601);
+});
+
+test("保存状态不会截断超过 500 条的一键下载历史", async () => {
+  let persisted = { wnacgStateV1: {
+    version: 1, watches: [], updates: [], activity: [], lastScanAt: null,
+    quickDownloads: Array.from({ length: 601 }, (_, index) => ({
+      aid: String(index + 1), status: "downloaded", startedAt: "2026-09-01"
+    }))
+  } };
+  globalThis.chrome = { storage: { local: {
+    get: async () => structuredClone(persisted),
+    set: async (value) => { persisted = structuredClone(value); }
+  } } };
+  await storage.saveAppState(await storage.loadAppState());
+  assert.equal(persisted.wnacgStateV1.quickDownloads.length, 601);
+});

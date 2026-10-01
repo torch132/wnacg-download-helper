@@ -21,9 +21,15 @@ import {
 } from "./core.js";
 import {
   chooseDirectory,
+  chooseLibraryDirectory,
   ensureDirectoryPermission,
+  ensureLibraryPermission,
+  findLocalArchive,
   getDirectoryHandle,
+  getLibraryDirectoryHandle,
   queryDirectoryPermission,
+  queryLibraryPermission,
+  scanLocalArchiveIndex,
   writeZipResponse
 } from "./file-system.js";
 import { addActivity, loadAppState, saveAppState, updateAppState } from "./storage.js";
@@ -35,6 +41,9 @@ const REQUEST_TIMEOUT_MS = 20_000;
 
 let state;
 let directoryHandle = null;
+let libraryHandle = null;
+let localArchiveIndex = null;
+let localArchiveCount = 0;
 let currentPageSnapshot = null;
 let editingWatchId = null;
 let busy = false;
@@ -48,9 +57,6 @@ async function init() {
   collectElements();
   bindEvents();
   state = await loadAppState();
-  const originalUpdateCount = state.updates.length;
-  state.updates = reconcileEquivalentChapterUpdates(state.updates);
-  const mergedCount = originalUpdateCount - state.updates.length;
 
   let recovered = 0;
   state.updates = state.updates.map((record) => {
@@ -60,34 +66,42 @@ async function init() {
       error: "上次下载因侧栏关闭或浏览器中断，请重试。"
     });
   });
-  if (mergedCount > 0) {
-    addActivity(state, "info", `已合并 ${mergedCount} 条旧独立话与合集重复记录。`);
-  }
   if (recovered > 0) {
     addActivity(state, "warning", `已恢复 ${recovered} 个被中断的下载任务。`);
   }
-  if (mergedCount > 0 || recovered > 0) {
+  if (recovered > 0) {
     await saveAppState(state);
   }
 
-  [directoryHandle, currentPageSnapshot] = await Promise.all([
+  [directoryHandle, libraryHandle, currentPageSnapshot] = await Promise.all([
     getDirectoryHandle().catch(() => null),
+    getLibraryDirectoryHandle().catch(() => null),
     refreshCurrentPageSnapshot()
   ]);
-  const imported = await importCurrentPageMatches(state.watches);
-  if (imported.length > 0) {
-    addActivity(
-      state,
-      "success",
-      `已从当前页面识别 ${imported.length} 个匹配章节。`
-    );
+  let libraryWarning = null;
+  const libraryReady = await refreshLocalArchiveIndex(false).catch((error) => {
+    libraryWarning = readableError(error);
+    return false;
+  });
+  const originalCount = state.updates.length;
+  const imported = libraryReady ? await importCurrentPageMatches(state.watches) : [];
+  if (state.updates.length !== originalCount || imported.length > 0) {
+    if (imported.length > 0) {
+      addActivity(
+        state,
+        "success",
+        `已从当前页面识别 ${imported.length} 个匹配章节。`
+      );
+    }
     await saveAppState(state);
   }
   await refreshDirectoryStatus();
+  await refreshLibraryStatus();
   renderAll();
   if (imported.length > 0) {
     showToast(`已从当前页面加入 ${imported.length} 个章节。`, "success");
   }
+  if (libraryWarning) showToast(`本地漫画库检查失败：${libraryWarning}`, "error");
 }
 
 async function readCurrentPageSnapshot() {
@@ -152,6 +166,7 @@ async function importCurrentPageMatches(watches, collectionCache = new Map()) {
     albums: isTagPage ? albums : filterAlbumsAfterBaselines(albums, watches),
     watchItems: watches,
     existingRecords: state.updates,
+    findLocalArchive: localArchiveFor,
     detectedAt: new Date().toISOString()
   });
   state.updates = result.records;
@@ -201,6 +216,7 @@ async function importCurrentTagPages(watches) {
       albums: expandedAlbums,
       watchItems: watches,
       existingRecords: state.updates,
+      findLocalArchive: localArchiveFor,
       detectedAt: new Date().toISOString()
     });
     state.updates = result.records;
@@ -213,6 +229,10 @@ async function importCurrentTagPages(watches) {
 function collectElements() {
   for (const id of [
     "choose-directory-btn",
+    "choose-library-btn",
+    "library-name",
+    "library-status",
+    "library-indicator",
     "directory-name",
     "directory-status",
     "directory-indicator",
@@ -254,6 +274,7 @@ function collectElements() {
 
 function bindEvents() {
   elements["choose-directory-btn"]?.addEventListener("click", handleDirectoryAction);
+  elements["choose-library-btn"]?.addEventListener("click", handleLibraryAction);
   elements["watch-form"]?.addEventListener("submit", handleWatchSubmit);
   elements["watch-cancel-edit"]?.addEventListener("click", cancelWatchEdit);
   elements["watch-list"]?.addEventListener("click", handleWatchListClick);
@@ -430,6 +451,109 @@ async function refreshDirectoryStatus() {
   }
 }
 
+async function handleLibraryAction() {
+  if (busy) return;
+  try {
+    if (libraryHandle && await queryLibraryPermission(libraryHandle) === "prompt") {
+      if (await ensureLibraryPermission(libraryHandle, true)) {
+        await refreshLocalArchiveIndex(false);
+        await refreshLibraryStatus();
+        renderAll();
+        showToast("已恢复本地漫画库读取权限。", "success");
+        return;
+      }
+    }
+    libraryHandle = await chooseLibraryDirectory();
+    await refreshLocalArchiveIndex(false);
+    await refreshLibraryStatus();
+    renderAll();
+    showToast(`已连接本地漫画库：${libraryHandle.name}`, "success");
+  } catch (error) {
+    if (error?.name !== "AbortError") showToast(readableError(error), "error");
+  }
+}
+
+async function refreshLibraryStatus() {
+  const permission = await queryLibraryPermission(libraryHandle);
+  const status = elements["library-status"];
+  const name = elements["library-name"];
+  const button = elements["choose-library-btn"];
+  const indicator = elements["library-indicator"];
+  if (!status || !name || !button) return;
+  status.dataset.state = permission;
+  indicator?.classList.toggle("is-online", permission === "granted");
+  indicator?.classList.toggle("is-error", permission === "unavailable" || permission === "denied");
+  name.textContent = libraryHandle?.name || "未选择目录";
+  status.textContent = permission === "granted" ? `已连接 · ${localArchiveCount} 个 ZIP`
+    : permission === "prompt" ? "需要授权"
+      : permission === "missing" ? "未连接" : "目录不可用";
+  button.textContent = permission === "granted" ? "更换漫画库"
+    : permission === "prompt" ? "重新授权" : "选择漫画库";
+}
+
+function localArchiveFor(comicName, title, aid) {
+  return localArchiveIndex && findLocalArchive(localArchiveIndex, comicName, title, aid);
+}
+
+async function refreshLocalArchiveIndex(requestPermission = false, extraComicNames = []) {
+  localArchiveIndex = null;
+  localArchiveCount = 0;
+  if (!libraryHandle || !await ensureLibraryPermission(libraryHandle, requestPermission)) {
+    return false;
+  }
+  const comicNames = [
+    ...state.watches.map((watch) => watch.prefix),
+    ...state.updates.map((record) => record.comicName),
+    ...extraComicNames
+  ];
+  const index = await scanLocalArchiveIndex(
+    libraryHandle,
+    comicNames
+  );
+  if (directoryHandle && await queryDirectoryPermission(directoryHandle) === "granted") {
+    try {
+      const saveIndex = await scanLocalArchiveIndex(directoryHandle, comicNames);
+      for (const [comicName, archives] of saveIndex) {
+        const existing = index.get(comicName) || [];
+        index.set(comicName, [...existing, ...archives.filter((archive) =>
+          !existing.some((item) => item.relativePath === archive.relativePath)
+        )]);
+      }
+    } catch {
+      // 保存目录是补充来源；外置卷暂时不可用不影响已授权漫画库的查重。
+    }
+  }
+  localArchiveCount = [...index.values()].reduce((total, archives) => total + archives.length, 0);
+  if (localArchiveCount === 0 && state.updates.some((record) =>
+    record.status === UPDATE_STATUS.DOWNLOADED
+  )) {
+    throw new Error("所选漫画库未找到任何已下载 ZIP；请选包含“漫画名”子目录的根目录。");
+  }
+  localArchiveIndex = index;
+  const checkedAt = new Date().toISOString();
+  state.updates = state.updates.map((record) => {
+    const archive = localArchiveFor(record.comicName, record.title, record.downloadAid || record.aid);
+    const next = {
+      ...record,
+      localCheckedAt: checkedAt,
+      localFilePresent: Boolean(archive)
+    };
+    if (archive) {
+      next.localFilePath = archive.relativePath;
+      next.status = UPDATE_STATUS.DOWNLOADED;
+      next.selected = false;
+      next.filePath = record.status === UPDATE_STATUS.DOWNLOADED && record.filePath
+        ? record.filePath : archive.relativePath;
+      next.downloadMethod = "local";
+      next.error = null;
+    }
+    return next;
+  });
+  if (state.updates.length) await saveAppState(state);
+  await refreshLibraryStatus();
+  return true;
+}
+
 async function handleWatchSubmit(event) {
   event.preventDefault();
   if (busy) return;
@@ -446,8 +570,22 @@ async function handleWatchSubmit(event) {
     return;
   }
 
+  let libraryGranted = false;
+  try {
+    libraryGranted = Boolean(libraryHandle && await ensureLibraryPermission(libraryHandle, true));
+  } catch (error) {
+    showToast(readableError(error), "error");
+    return;
+  }
+  if (!libraryGranted) {
+    showToast("请先选择并授权本地漫画库，避免把已下载章节重新列为待下载。", "warning");
+    await refreshLibraryStatus();
+    return;
+  }
+
   setBusy(true, "正在建立关注基线…");
   try {
+    await refreshLocalArchiveIndex(false, [prefix]);
     await refreshCurrentPageSnapshot();
     const baseline = await findBaseline(prefix);
     const id = editingWatchId || crypto.randomUUID();
@@ -469,8 +607,7 @@ async function handleWatchSubmit(event) {
 
     if (editingWatchId) {
       state.watches = state.watches.map((item) => (item.id === id ? watch : item));
-      state.updates = state.updates.filter((item) => item.watchId !== id);
-      addActivity(state, "info", `已更新关注“${prefix}”并重新建立基线。`);
+      addActivity(state, "info", `已更新关注“${prefix}”并重新建立基线；原进度记录已保留。`);
     } else {
       state.watches.push(watch);
       addActivity(state, "info", `已添加关注“${prefix}”。`);
@@ -615,6 +752,20 @@ async function scanForUpdates() {
     return;
   }
 
+  setBusy(true, "正在核对本地漫画库…");
+  try {
+    if (!await refreshLocalArchiveIndex(true)) {
+      await refreshLibraryStatus();
+      showToast("请先选择并授权本地漫画库，再检查更新。", "warning");
+      setBusy(false);
+      return;
+    }
+  } catch (error) {
+    showToast(`本地漫画库检查失败：${readableError(error)}`, "error");
+    setBusy(false);
+    return;
+  }
+
   setBusy(true, "正在检查更新…");
   const reachedBoundary = new Map(watches.map((watch) => [watch.id, false]));
   const newestMatches = new Map();
@@ -648,9 +799,11 @@ async function scanForUpdates() {
         url: `https://www.wnacg.com/photos-index-aid-${item.downloadAid}.html`
       }));
       const result = createUpdateCandidates({
-        albums: filterAlbumsAfterBaselines(albums, [watch]),
+        // 当前合集每次都核对全部子话，是否已下载由本地 ZIP 决定。
+        albums,
         watchItems: [watch],
         existingRecords: state.updates,
+        findLocalArchive: localArchiveFor,
         detectedAt: new Date().toISOString()
       });
       state.updates = result.records;
@@ -701,6 +854,7 @@ async function scanForUpdates() {
         albums: eligibleAlbums,
         watchItems: watches,
         existingRecords: state.updates,
+        findLocalArchive: localArchiveFor,
         detectedAt: new Date().toISOString()
       });
       state.updates = result.records;
@@ -797,7 +951,10 @@ function handleUpdateGroupToggle(event) {
 
 function handleSelectAll(event) {
   const checked = event.target.checked;
-  for (const record of actionableUpdates()) record.selected = checked;
+  const keys = new Set(actionableUpdates().map(updateKey));
+  for (const record of state.updates) {
+    if (keys.has(updateKey(record))) record.selected = checked;
+  }
   void saveAppState(state).then(renderAll);
 }
 
@@ -825,9 +982,12 @@ async function ignoreSelected() {
 
 async function retryFailed() {
   if (busy) return;
+  const failedKeys = new Set(visibleUpdates()
+    .filter((record) => record.status === UPDATE_STATUS.FAILED)
+    .map(updateKey));
   let count = 0;
   for (const record of state.updates) {
-    if (record.status === UPDATE_STATUS.FAILED) {
+    if (failedKeys.has(updateKey(record))) {
       record.selected = true;
       count += 1;
     }
@@ -842,9 +1002,23 @@ async function retryFailed() {
 
 async function downloadSelected() {
   if (busy) return;
+  setBusy(true, "正在核对本地文件…");
+  try {
+    if (!await refreshLocalArchiveIndex(true)) {
+      showToast("请先选择并授权本地漫画库，以核对已下载文件。", "warning");
+      setBusy(false);
+      return;
+    }
+  } catch (error) {
+    showToast(`本地漫画库检查失败：${readableError(error)}`, "error");
+    setBusy(false);
+    return;
+  }
+  renderAll();
   const selected = actionableUpdates().filter((record) => record.selected);
   if (selected.length === 0) {
-    showToast("请先选择要下载的章节。", "warning");
+    showToast("本地已有文件，或当前没有选中的待下载章节。", "info");
+    setBusy(false);
     return;
   }
 
@@ -852,6 +1026,7 @@ async function downloadSelected() {
   if (!permission) {
     await refreshDirectoryStatus();
     showToast("请先选择并授权目标目录。", "warning");
+    setBusy(false);
     return;
   }
 
@@ -917,7 +1092,10 @@ async function downloadSelected() {
       record = transitionUpdate(record, UPDATE_STATUS.DOWNLOADED, {
         downloadedAt: new Date().toISOString(),
         filePath: written.relativePath,
-        bytesWritten: written.bytesWritten
+        bytesWritten: written.bytesWritten,
+        localCheckedAt: new Date().toISOString(),
+        localFilePresent: true,
+        localFilePath: written.relativePath
       });
       replaceUpdate(record);
       addActivity(state, "success", `已下载：${written.relativePath}`);
@@ -952,8 +1130,12 @@ function updateKey(record) {
   return String(record?.recordKey || `album:${record?.aid || ""}`);
 }
 
+function visibleUpdates() {
+  return reconcileEquivalentChapterUpdates(state.updates);
+}
+
 function actionableUpdates() {
-  return state.updates.filter((record) =>
+  return visibleUpdates().filter((record) =>
     [UPDATE_STATUS.PENDING, UPDATE_STATUS.FAILED].includes(record.status)
   );
 }
@@ -1014,7 +1196,7 @@ function renderUpdates() {
   const list = elements["updates-list"];
   if (!list) return;
   list.replaceChildren();
-  const sorted = [...state.updates].sort((a, b) =>
+  const sorted = visibleUpdates().sort((a, b) =>
     String(b.detectedAt).localeCompare(String(a.detectedAt))
   );
   elements["updates-empty"]?.toggleAttribute("hidden", sorted.length > 0);
@@ -1131,7 +1313,7 @@ function renderActivity() {
 function renderActions() {
   const actionable = actionableUpdates();
   const selected = actionable.filter((record) => record.selected);
-  const failed = state.updates.filter((record) => record.status === UPDATE_STATUS.FAILED);
+  const failed = visibleUpdates().filter((record) => record.status === UPDATE_STATUS.FAILED);
   if (elements["pending-count"]) elements["pending-count"].textContent = actionable.length;
   if (elements["failed-count"]) elements["failed-count"].textContent = failed.length;
   if (elements["selection-count"]) {
@@ -1168,7 +1350,10 @@ function setBusy(value, message = "") {
     setProgressVisual(0, MAX_SCAN_PAGES, "尚未开始", `0 / ${MAX_SCAN_PAGES} 页`);
   }
   renderActions();
-  if (!value) renderLastScan();
+  if (!value) {
+    renderUpdates();
+    renderLastScan();
+  }
 }
 
 function setScanProgress(current, total, message) {

@@ -682,8 +682,11 @@ function mergeEquivalentChapterUpdates(first, second) {
   const bundle = chapterRecordKind(first) === "bundle" ? first : second;
   const firstPriority = UPDATE_STATUS_PRIORITY[first.status] || 0;
   const secondPriority = UPDATE_STATUS_PRIORITY[second.status] || 0;
-  const preferred = firstPriority > secondPriority ? first
-    : secondPriority > firstPriority ? second : bundle;
+  const checked = [first, second].filter((item) => item.localCheckedAt);
+  const found = checked.find((item) => item.localFilePresent);
+  const preferred = found || (checked.length === 2 ? bundle : checked[0]) ||
+    (firstPriority > secondPriority ? first
+      : secondPriority > firstPriority ? second : bundle);
   const merged = {
     ...first,
     ...second,
@@ -692,7 +695,9 @@ function mergeEquivalentChapterUpdates(first, second) {
     selected: [UPDATE_STATUS.DOWNLOADED, UPDATE_STATUS.IGNORED].includes(preferred.status)
       ? false : Boolean(preferred.selected),
     detectedAt: preferred.detectedAt || bundle.detectedAt || first.detectedAt,
-    error: preferred.status === UPDATE_STATUS.DOWNLOADED ? null : preferred.error || null
+    error: preferred.status === UPDATE_STATUS.DOWNLOADED ? null : preferred.error || null,
+    filePath: preferred.filePath || null,
+    downloadMethod: preferred.downloadMethod || null
   };
   for (const field of ["filePath", "downloadedAt", "bytesWritten", "downloadMethod"]) {
     if (preferred[field] != null) merged[field] = preferred[field];
@@ -714,9 +719,11 @@ export function createUpdateCandidates({
   albums = [],
   watchItems = [],
   existingRecords = [],
+  findLocalArchive = null,
   detectedAt = new Date().toISOString(),
 } = {}) {
-  const records = reconcileEquivalentChapterUpdates(existingRecords);
+  // 原始历史记录不做合并或裁剪；重复只在界面投影中折叠。
+  const records = existingRecords.map((record) => ({ ...record }));
   const existingByKey = new Map(
     records.map((record, index) => [
       String(record?.recordKey || `album:${record?.aid ?? ""}`),
@@ -738,13 +745,26 @@ export function createUpdateCandidates({
 
     if (existingByKey.has(recordKey)) {
       const index = existingByKey.get(recordKey);
-      records[index] = {
+      const updated = {
         ...records[index],
         title: String(album.title ?? records[index].title ?? "").trim(),
         sourceUrl: album.url || album.sourceUrl || records[index].sourceUrl,
         downloadPageUrl: album.downloadPageUrl || records[index].downloadPageUrl,
         zipUrl: album.zipUrl || records[index].zipUrl || null,
       };
+      if (findLocalArchive) {
+        const archive = findLocalArchive(updated.comicName, updated.title, aid);
+        updated.localCheckedAt = detectedAt;
+        updated.localFilePresent = Boolean(archive);
+        if (archive) {
+          updated.status = UPDATE_STATUS.DOWNLOADED;
+          updated.selected = false;
+          updated.filePath = archive.relativePath;
+          updated.downloadMethod = "local";
+          updated.error = null;
+        }
+      }
+      records[index] = updated;
       continue;
     }
 
@@ -767,15 +787,16 @@ export function createUpdateCandidates({
       detectedAt,
       error: null,
     };
-    const equivalentIndex = records.findIndex((record) =>
-      isSameChapterAcrossCollections(record, candidate)
-    );
-    if (equivalentIndex !== -1) {
-      records[equivalentIndex] = mergeEquivalentChapterUpdates(
-        records[equivalentIndex], candidate
-      );
-      existingByKey.set(recordKey, equivalentIndex);
-      continue;
+    if (findLocalArchive) {
+      const archive = findLocalArchive(candidate.comicName, candidate.title, candidate.downloadAid);
+      candidate.localCheckedAt = detectedAt;
+      candidate.localFilePresent = Boolean(archive);
+      if (archive) {
+        candidate.status = UPDATE_STATUS.DOWNLOADED;
+        candidate.selected = false;
+        candidate.filePath = archive.relativePath;
+        candidate.downloadMethod = "local";
+      }
     }
     const pendingIndex = added.findIndex((record) =>
       isSameChapterAcrossCollections(record, candidate)
@@ -791,7 +812,7 @@ export function createUpdateCandidates({
 
   return {
     records: [...records, ...added],
-    added,
+    added: added.filter((record) => record.status === UPDATE_STATUS.PENDING),
   };
 }
 

@@ -470,11 +470,26 @@ test("旧独立话与合集子话合并为同一进度并保留成功文件", ()
   const scanned = core.createUpdateCandidates({
     albums: [{ ...bundle, title: bundle.title }],
     watchItems: [watch],
-    existingRecords: [old]
+    existingRecords: [old],
+    findLocalArchive: () => ({ relativePath: "砲友滿屋/砲友滿屋 18-19話.zip" })
   });
-  assert.equal(scanned.records.length, 1);
+  assert.equal(scanned.records.length, 2, "旧独立记录必须原样保留");
   assert.equal(scanned.added.length, 0);
-  assert.equal(scanned.records[0].status, "downloaded");
+  assert.deepEqual(scanned.records[0], old);
+  assert.equal(scanned.records[1].status, "downloaded");
+  assert.equal(core.reconcileEquivalentChapterUpdates(scanned.records).length, 1);
+
+  const missing = core.createUpdateCandidates({
+    albums: [{ ...bundle, title: bundle.title }],
+    watchItems: [watch],
+    existingRecords: [old],
+    findLocalArchive: () => null
+  });
+  assert.equal(missing.records.length, 2);
+  assert.equal(missing.records[0].status, "downloaded", "原始历史状态不得被改写");
+  assert.equal(missing.added.length, 1);
+  assert.equal(core.reconcileEquivalentChapterUpdates(missing.records)[0].status, "pending",
+    "本地文件确实缺失时，应以已核查的新合集记录为准");
 
   const unrelated = { ...old, watchId: "other", comicName: "另一部漫画" };
   assert.equal(core.reconcileEquivalentChapterUpdates([unrelated, bundle]).length, 2);

@@ -1,8 +1,15 @@
-import { hasZipSignature, sanitizeFileName } from "./core.js";
+import {
+  extractChapterLabel,
+  hasZipSignature,
+  normalizeTitle,
+  sanitizeFileName,
+  truncateUtf8
+} from "./core.js";
 
 const DB_NAME = "wnacg-directory-access";
 const STORE_NAME = "handles";
 const ROOT_KEY = "download-root";
+const LIBRARY_KEY = "comic-library-root";
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -37,6 +44,10 @@ export async function getDirectoryHandle() {
   return withStore("readonly", (store) => store.get(ROOT_KEY));
 }
 
+export async function getLibraryDirectoryHandle() {
+  return withStore("readonly", (store) => store.get(LIBRARY_KEY));
+}
+
 export async function chooseDirectory() {
   if (!("showDirectoryPicker" in window)) {
     throw new Error("当前 Chrome 不支持目录授权，请升级桌面版 Chrome。");
@@ -44,6 +55,127 @@ export async function chooseDirectory() {
   const handle = await window.showDirectoryPicker({ mode: "readwrite" });
   await withStore("readwrite", (store) => store.put(handle, ROOT_KEY));
   return handle;
+}
+
+export async function chooseLibraryDirectory() {
+  if (!("showDirectoryPicker" in window)) {
+    throw new Error("当前 Chrome 不支持目录授权，请升级桌面版 Chrome。");
+  }
+  // 漫画库仅用于查重；选择和后续权限均为只读，不得创建或修改文件。
+  const handle = await window.showDirectoryPicker({ mode: "read" });
+  await withStore("readwrite", (store) => store.put(handle, LIBRARY_KEY));
+  return handle;
+}
+
+export async function queryLibraryPermission(handle) {
+  if (!handle) return "missing";
+  try {
+    return await handle.queryPermission({ mode: "read" });
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function ensureLibraryPermission(handle, request = false) {
+  if (!handle) return false;
+  const current = await queryLibraryPermission(handle);
+  if (current === "granted") return true;
+  if (request && current === "prompt") {
+    return (await handle.requestPermission({ mode: "read" })) === "granted";
+  }
+  return false;
+}
+
+function normalizedArchiveStem(fileName) {
+  return normalizeTitle(String(fileName).replace(/\.zip$/iu, ""))
+    .replace(/ \(\d+\)$/u, "");
+}
+
+function normalizeChapterIdentity(label) {
+  return normalizeTitle(label).replace(/^第/u, "").replace(/話/gu, "话").replace(/巻/gu, "卷");
+}
+
+function chapterIdentity(title, comicName) {
+  const normalized = normalizeTitle(title);
+  // 版本标签不参与话数提取，但必须在两侧完全一致，防止 DL/无修正等误并。
+  const tags = normalized.match(/(?:\s*\[[^\]]+\])+$/u)?.[0] || "";
+  const withoutTags = tags ? normalized.slice(0, -tags.length).trim() : normalized;
+  return {
+    label: normalizeChapterIdentity(
+      extractChapterLabel(withoutTags, { seriesPrefix: comicName }) || ""
+    ),
+    tags: tags.replace(/\s+/gu, "")
+  };
+}
+
+function aidFromArchiveStem(stem) {
+  return stem.match(/(?:^wnacg-|\[aid-)(\d+)(?:-\d+)?\]?$/iu)?.[1] || null;
+}
+
+/**
+ * 只读取授权漫画库的第一层漫画文件夹及其中 ZIP；不进入子目录、不写入文件。
+ * 返回 Map<漫画名, Array<{fileName, relativePath, size, stem, aid, chapter}>>。
+ */
+export async function scanLocalArchiveIndex(rootHandle, comicNames = []) {
+  if (!rootHandle) throw new Error("尚未选择本地漫画库目录。");
+  const index = new Map();
+  for (const comicName of new Set(comicNames.map((name) => String(name).trim()).filter(Boolean))) {
+    const folderNames = [...new Set([
+      sanitizeFileName(comicName),
+      truncateUtf8(sanitizeFileName(comicName), 80)
+    ])];
+    const archives = [];
+    for (const folderName of folderNames) {
+      let folder;
+      try {
+        folder = await rootHandle.getDirectoryHandle(folderName, { create: false });
+      } catch (error) {
+        if (error?.name === "NotFoundError") continue;
+        throw error;
+      }
+      for await (const handle of folder.values()) {
+        if (handle.kind !== "file" || !/\.zip$/iu.test(handle.name)) continue;
+        const file = await handle.getFile();
+        if (file.size < 4) continue;
+        const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+        if (!hasZipSignature(signature) || signature[2] !== 0x03 || signature[3] !== 0x04) {
+          continue;
+        }
+        const stem = normalizedArchiveStem(handle.name);
+        archives.push({
+          fileName: handle.name,
+          relativePath: `${folderName}/${handle.name}`,
+          size: file.size,
+          stem,
+          aid: aidFromArchiveStem(stem),
+          chapter: chapterIdentity(stem, comicName)
+        });
+      }
+    }
+    index.set(comicName, archives);
+  }
+  return index;
+}
+
+/** 精确标题优先，随后是文件名中的 aid，最后才使用唯一且版本一致的话数。 */
+export function findLocalArchive(index, comicName, title, aid) {
+  const archives = index?.get?.(String(comicName).trim()) || [];
+  const titleStem = normalizedArchiveStem(sanitizeFileName(title));
+  const exact = archives.find((archive) => archive.stem === titleStem);
+  if (exact) return { ...exact, matchKind: "title" };
+
+  const strongAid = String(aid ?? "").trim();
+  if (/^\d+$/u.test(strongAid)) {
+    const aidMatch = archives.find((archive) => archive.aid === strongAid);
+    if (aidMatch) return { ...aidMatch, matchKind: "aid" };
+  }
+
+  const chapter = chapterIdentity(title, comicName);
+  if (!chapter.label) return null;
+  const matches = archives.filter((archive) =>
+    archive.chapter.label === chapter.label && archive.chapter.tags === chapter.tags
+  );
+  return matches.length === 1 ? { ...matches[0], matchKind: "chapter" } : null;
 }
 
 export async function queryDirectoryPermission(handle) {

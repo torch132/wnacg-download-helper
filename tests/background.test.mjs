@@ -32,7 +32,8 @@ function createEnvironment({
   pageTitle,
   redirectUrl,
   downloadError,
-  collection
+  collection,
+  libraryFiles = null
 } = {}) {
   let local = {
     wnacgStateV1: localState || {
@@ -54,6 +55,47 @@ function createEnvironment({
   const downloadOptions = [];
   const fetchUrls = [];
   const sidePanelCalls = [];
+
+  delete globalThis.indexedDB;
+  if (libraryFiles) {
+    const directory = {
+      async *values() {
+        for (const name of libraryFiles.files) {
+          yield {
+            kind: "file", name,
+            async getFile() {
+              const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 1]);
+              return { size: bytes.length, slice() {
+                return { async arrayBuffer() { return bytes.buffer; } };
+              } };
+            }
+          };
+        }
+      }
+    };
+    const handle = {
+      async queryPermission() { return "granted"; },
+      async getDirectoryHandle(name) {
+        if (name === libraryFiles.comicName) return directory;
+        throw Object.assign(new Error("not found"), { name: "NotFoundError" });
+      }
+    };
+    const database = {
+      transaction() { return { objectStore() { return {
+        get(key) {
+          const request = { result: key === "comic-library-root" ? handle : null };
+          queueMicrotask(() => request.onsuccess?.());
+          return request;
+        }
+      }; } }; },
+      close() {}
+    };
+    globalThis.indexedDB = { open() {
+      const request = { result: database };
+      queueMicrotask(() => request.onsuccess?.());
+      return request;
+    } };
+  }
 
   globalThis.chrome = {
     storage: {
@@ -654,11 +696,61 @@ test("旧独立话的一键下载文件已存在时，合集不重复下载同�
   const result = await env.send(parentAid, 67, undefined, "砲友滿屋", false);
   assert.equal(result.state, "complete");
   assert.equal(env.downloadCalls, 0);
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
-  const record = env.local.wnacgStateV1.quickDownloads[0];
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2,
+    "旧独立下载历史必须保留");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].recordKey, `album:${childAid}`);
+  const record = env.local.wnacgStateV1.quickDownloads[1];
   assert.equal(record.recordKey, `bundle:${parentAid}:${childAid}`);
   assert.equal(record.status, "downloaded");
   assert.equal(record.actualFilePath, filename);
+});
+
+test("已授权漫画库中的 ZIP 是合集一键下载的查重依据", async () => {
+  const env = createEnvironment({
+    libraryFiles: {
+      comicName: "砲友滿屋",
+      files: ["砲友滿屋 18-19話.zip"]
+    },
+    collection: {
+      sourceAid: "390062",
+      items: [{ aid: "388404", title: "砲友滿屋 18-19話" }],
+      total: 1, limit: 30
+    }
+  });
+  await importBackground("local-archive-baseline");
+  const result = await env.send("390062", 67, undefined, "砲友滿屋", false);
+  assert.equal(result.state, "complete");
+  assert.equal(env.downloadCalls, 0);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].downloadMethod, "local");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].localFilePath,
+    "砲友滿屋/砲友滿屋 18-19話.zip");
+});
+
+test("授权漫画库缺少 ZIP 时不能仅凭旧下载记录跳过下载", async () => {
+  const env = createEnvironment({
+    libraryFiles: { comicName: "砲友滿屋", files: [] },
+    localState: {
+      version: 1, watches: [], updates: [], activity: [], lastScanAt: null,
+      quickDownloads: [{
+        aid: "388404", recordKey: "album:388404", comicName: "砲友滿屋",
+        title: "砲友滿屋 18-19話", status: "downloaded",
+        relativePath: "砲友滿屋/砲友滿屋 18-19話.zip",
+        actualFilePath: "/Users/tester/Downloads/砲友滿屋/砲友滿屋 18-19話.zip",
+        startedAt: "2026-09-28"
+      }]
+    },
+    collection: {
+      sourceAid: "390062",
+      items: [{ aid: "388404", title: "砲友滿屋 18-19話" }],
+      total: 1, limit: 30
+    }
+  });
+  await importBackground("missing-local-beats-history");
+  const result = await env.send("390062", 68, undefined, "砲友滿屋", false);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 1);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].recordKey, "album:388404",
+    "旧历史记录仍保留");
 });
 
 test("旧独立话仍在下载时，合集接管同一任务而不创建第二个下载", async () => {
@@ -693,16 +785,17 @@ test("旧独立话仍在下载时，合集接管同一任务而不创建第二�
   const result = await env.send(parentAid, 68, undefined, "砲友滿屋", false);
   assert.equal(result.state, "downloading");
   assert.equal(env.downloadCalls, 0);
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
-  assert.equal(env.local.wnacgStateV1.quickDownloads[0].recordKey,
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].recordKey, `album:${childAid}`);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[1].recordKey,
     `bundle:${parentAid}:${childAid}`);
 
   env.downloads.get(500).state = "complete";
   env.change({ id: 500, state: { current: "complete" } });
-  await waitFor(() => env.local.wnacgStateV1.quickDownloads[0].status === "downloaded",
+  await waitFor(() => env.local.wnacgStateV1.quickDownloads[1].status === "downloaded",
     "原下载任务结束后合集子章节应标记完成");
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 1);
-  assert.equal(env.local.wnacgStateV1.quickDownloads[0].actualFilePath, filename);
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[1].actualFilePath, filename);
 });
 
 test("合集一键下载完成会同步并合并旧独立话的失败进度", async () => {
@@ -733,12 +826,13 @@ test("合集一键下载完成会同步并合并旧独立话的失败进度", as
   assert.equal(result.state, "downloading");
   env.downloads.get(901).state = "complete";
   env.change({ id: 901, state: { current: "complete" } });
-  await waitFor(() => env.local.wnacgStateV1.updates.length === 1 &&
-    env.local.wnacgStateV1.updates[0].status === "downloaded",
-  "下载完成后应只留一条已下载进度");
-  assert.equal(env.local.wnacgStateV1.updates[0].recordKey,
+  await waitFor(() => env.local.wnacgStateV1.updates.length === 2 &&
+    env.local.wnacgStateV1.updates.every((record) => record.status === "downloaded"),
+  "下载完成后应保留两条原始记录并标记已下载");
+  assert.equal(env.local.wnacgStateV1.updates[0].recordKey, `album:${childAid}`);
+  assert.equal(env.local.wnacgStateV1.updates[1].recordKey,
     `bundle:${parentAid}:${childAid}`);
-  assert.equal(env.local.wnacgStateV1.updates[0].error, null);
+  assert.equal(env.local.wnacgStateV1.updates[1].error, null);
 });
 
 test("连载合集补全当前七话后只下载后来新增的子章节", async () => {
@@ -895,7 +989,7 @@ test("合集章节清单不完整时在创建任何 Chrome 下载前终止", asy
   assert.deepEqual(env.local.wnacgStateV1.quickDownloads, []);
 });
 
-test("合集写回清单时移除旧版父 aid 单记录", async () => {
+test("合集写回清单时保留旧版父 aid 历史但不计入当前下载", async () => {
   const sourceAid = "388294";
   const env = createEnvironment({
     collection: {
@@ -927,10 +1021,14 @@ test("合集写回清单时移除旧版父 aid 单记录", async () => {
 
   const result = await env.send(sourceAid, 65, undefined, "迁移合集", true);
   assert.equal(result.state, "downloading");
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 2);
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 3);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].aid, sourceAid);
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].error, "旧版父记录");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].supersededByCollection, true);
   assert.deepEqual(
-    env.local.wnacgStateV1.quickDownloads.map((item) => item.recordKey),
+    env.local.wnacgStateV1.quickDownloads.slice(1).map((item) => item.recordKey),
     [`bundle:${sourceAid}:250001`, `bundle:${sourceAid}:250002`]
   );
-  assert.ok(env.local.wnacgStateV1.quickDownloads.every((item) => item.sourceAid === sourceAid));
+  assert.ok(env.local.wnacgStateV1.quickDownloads.slice(1)
+    .every((item) => item.sourceAid === sourceAid));
 });
