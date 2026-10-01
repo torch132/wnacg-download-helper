@@ -10,12 +10,6 @@ import {
   sanitizeFileName,
   truncateUtf8
 } from "./core.js";
-import {
-  ensureLibraryPermission,
-  findLocalArchive,
-  getLibraryDirectoryHandle,
-  scanLocalArchiveIndex
-} from "./file-system.js";
 import { addActivity, loadAppState, updateAppState } from "./storage.js";
 
 const QUICK_DOWNLOAD = "WNACG_QUICK_DOWNLOAD";
@@ -295,6 +289,10 @@ async function rememberFilenamePath(url, relativePath) {
 
 async function forgetFilenamePath(url, relativePath) {
   await filenamePathsReady;
+  // 同一 ZIP 被再次点击且两轮下载重叠时，仍在进行的任务还需要这条文件名映射。
+  if ([...activeMemory.values()].some((item) =>
+    item.zipUrl === url && item.relativePath === relativePath
+  )) return;
   const keys = downloadUrlKeys(url);
   for (const key of keys) {
     if (desiredPathsByUrl.get(key) === relativePath) desiredPathsByUrl.delete(key);
@@ -321,47 +319,6 @@ function pathMatchesRelative(actualPath, relativePath) {
   const stem = relative.slice(0, -extension.length);
   const escaped = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`${escaped(stem)} \\(\\d+\\)${escaped(extension)}$`, "u").test(actual);
-}
-
-async function readLocalArchiveIndex(comicName) {
-  let handle;
-  try {
-    handle = await getLibraryDirectoryHandle();
-  } catch (error) {
-    if (typeof indexedDB === "undefined") return null;
-    throw new Error(`无法读取本地漫画库授权：${error?.message || error}`);
-  }
-  if (!handle) return null;
-  if (!await ensureLibraryPermission(handle, false)) {
-    throw new Error("本地漫画库权限失效，请打开侧栏重新授权后再下载。");
-  }
-  return scanLocalArchiveIndex(handle, [comicName]);
-}
-
-async function completedQuickDownloadExists(record, localIndexes = null) {
-  if (record?.status !== "downloaded") return false;
-  const comicName = String(record.comicName || "");
-  if (localIndexes && !localIndexes.has(comicName)) {
-    localIndexes.set(comicName, readLocalArchiveIndex(comicName));
-  }
-  const index = await (localIndexes?.get(comicName) || readLocalArchiveIndex(comicName));
-  if (index || record.downloadMethod === "local") {
-    return Boolean(index && findLocalArchive(
-      index, record.comicName, record.title, record.downloadAid || record.aid
-    ));
-  }
-  if (!pathMatchesRelative(record.actualFilePath, record.relativePath)) return false;
-  if (!Number.isInteger(record.downloadId)) return true;
-  try {
-    const [item] = await chrome.downloads.search({ id: record.downloadId });
-    return Boolean(
-      item &&
-      item.exists !== false &&
-      pathMatchesRelative(item.filename || record.actualFilePath, record.relativePath)
-    );
-  } catch {
-    return true;
-  }
 }
 
 function readableDownloadError(errorCode) {
@@ -400,10 +357,19 @@ function sourceAidFor(record) {
   return String(record?.sourceAid || record?.aid || "");
 }
 
-function recordsForSource(records, sourceAid) {
-  return records.filter((record) =>
+function recordsForSource(records, sourceAid, batchId) {
+  const matching = records.filter((record) =>
     sourceAidFor(record) === String(sourceAid) && !record.supersededByCollection
   );
+  const selectedBatch = batchId === undefined
+    ? matching.at(-1)?.batchId || null
+    : batchId || null;
+  return matching.filter((record) => (record.batchId || null) === selectedBatch);
+}
+
+function sameQuickTask(record, target) {
+  return recordKeyFor(record) === recordKeyFor(target) &&
+    (record?.batchId || null) === (target?.batchId || null);
 }
 
 function aggregateSourceState(records) {
@@ -423,30 +389,6 @@ function aggregateSourceState(records) {
     return { state: "complete", completed, total: expectedTotal };
   }
   return { state: "error", completed, total: expectedTotal };
-}
-
-async function findActiveByRecordKey(recordKey, tabIds = [], equivalentCandidate = null) {
-  const active = await readActiveDownloads();
-  const entry = Object.entries(active).find(([, item]) =>
-    recordKeyFor(item) === recordKey ||
-    (equivalentCandidate && isSameChapterAcrossCollections(item, equivalentCandidate))
-  );
-  if (!entry) return null;
-  const [downloadId, metadata] = entry;
-  const mergedTabIds = mergeTabIds(metadata.tabIds, tabIds);
-  const migrated = recordKeyFor(metadata) !== recordKey;
-  if (migrated || mergedTabIds.length !== (metadata.tabIds || []).length) {
-    if (migrated) {
-      Object.assign(metadata, equivalentCandidate);
-      metadata.aid = equivalentCandidate.downloadAid;
-    }
-    metadata.tabIds = mergedTabIds;
-    activeMemory.set(Number(downloadId), metadata);
-    await mutateActiveDownloads((latest) => {
-      if (latest[downloadId]) latest[downloadId] = metadata;
-    });
-  }
-  return { downloadId: Number(downloadId), metadata };
 }
 
 async function subscribeFlight(flight, tabId) {
@@ -476,6 +418,7 @@ async function handleQuickDownload(message, sender) {
 
   const flight = {
     aid: request.aid,
+    batchId: crypto.randomUUID(),
     tabIds: new Set(),
     metadatas: new Map(),
     promise: null
@@ -489,7 +432,6 @@ async function handleQuickDownload(message, sender) {
 }
 
 async function startQuickDownload(request, flight) {
-  const { aid } = request;
   await ensureRecovery();
   const manifest = await resolveDownloadItems(request);
   const initialState = await loadAppState();
@@ -498,92 +440,31 @@ async function startQuickDownload(request, flight) {
     initialState.watches,
     manifest.officialTitle
   );
-  const localIndex = await readLocalArchiveIndex(comicName);
-  const equivalentCandidate = (item) => ({ ...item, comicName,
-    collectionTotal: manifest.total });
-  const priorFor = (records, item) =>
-    records.find((record) => recordKeyFor(record) === item.recordKey) ||
-    records.find((record) =>
-      isSameChapterAcrossCollections(record, equivalentCandidate(item))
-    );
-  const completedKeys = new Set();
-  const completedPrior = new Map();
-  const activeKeys = new Set();
-  for (const item of manifest.items) {
-    const localArchive = findLocalArchive(localIndex, comicName, item.title, item.downloadAid);
-    if (localArchive) {
-      completedKeys.add(item.recordKey);
-      completedPrior.set(item.recordKey, {
-        status: "downloaded",
-        downloadMethod: "local",
-        relativePath: localArchive.relativePath,
-        actualFilePath: localArchive.relativePath,
-        localFilePath: localArchive.relativePath
-      });
-      continue;
-    }
-    const priorRecords = initialState.quickDownloads.filter((record) =>
-      recordKeyFor(record) === item.recordKey ||
-      isSameChapterAcrossCollections(record, equivalentCandidate(item))
-    );
-    for (const prior of localIndex ? [] : priorRecords) {
-      if (!await completedQuickDownloadExists(prior)) continue;
-      completedKeys.add(item.recordKey);
-      completedPrior.set(item.recordKey, prior);
-      break;
-    }
-    const active = await findActiveByRecordKey(
-      item.recordKey,
-      flight.tabIds,
-      { ...equivalentCandidate(item), sourceAid: manifest.sourceAid }
-    );
-    if (active) {
-      activeKeys.add(item.recordKey);
-      flight.metadatas.set(active.downloadId, active.metadata);
-    }
-  }
-
   const now = new Date().toISOString();
   await mutateAppState((state) => {
-    const latestByKey = new Map(
-      state.quickDownloads.map((record) => [recordKeyFor(record), record])
-    );
-    for (const item of manifest.items) {
-      const current = completedPrior.get(item.recordKey) ||
-        latestByKey.get(item.recordKey) || priorFor(state.quickDownloads, item);
-      const record = {
-        ...(current || {}),
+    // 网页按钮每次点击都是新批次；旧记录仅保留为历史，不参与是否下载的判断。
+    state.quickDownloads = state.quickDownloads
+      .map((record) => manifest.isCollection &&
+        sourceAidFor(record) === manifest.sourceAid && !record.batchId
+          ? { ...record, supersededByCollection: true }
+          : record)
+      .concat(manifest.items.map((item) => ({
         ...item,
+        batchId: flight.batchId,
         aid: item.downloadAid,
         sourceAid: manifest.sourceAid,
         sourceTitle: request.title,
         comicName,
         collectionTotal: manifest.total,
-        status: completedKeys.has(item.recordKey) ? "downloaded" : "downloading",
-        startedAt: completedKeys.has(item.recordKey) ? current?.startedAt : now,
+        downloadMethod: "quick",
+        status: "downloading",
+        startedAt: now,
         error: null
-      };
-      if (activeKeys.has(item.recordKey)) {
-        record.downloadId = current?.downloadId;
-      } else if (!completedKeys.has(item.recordKey)) {
-        delete record.downloadId;
-        delete record.actualFilePath;
-      }
-      latestByKey.set(item.recordKey, record);
-    }
-    const manifestKeys = new Set(manifest.items.map((item) => item.recordKey));
-    state.quickDownloads = state.quickDownloads
-      .filter((record) => !manifestKeys.has(recordKeyFor(record)))
-      .map((record) => manifest.isCollection &&
-        sourceAidFor(record) === manifest.sourceAid
-          ? { ...record, supersededByCollection: true }
-          : record)
-      .concat(manifest.items.map((item) => latestByKey.get(item.recordKey)));
+      })));
   });
 
   const results = [];
   for (const item of manifest.items) {
-    if (completedKeys.has(item.recordKey) || activeKeys.has(item.recordKey)) continue;
     try {
       results.push(await startDownloadItem({
         item,
@@ -593,14 +474,14 @@ async function startQuickDownload(request, flight) {
         flight
       }));
     } catch (error) {
-      await markStartFailure(item, comicName, manifest, error);
+      await markStartFailure(item, comicName, manifest, flight.batchId, error);
       results.push({ ok: false, state: "error", message: readableDownloadException(error) });
     }
   }
 
   const latestState = await loadAppState();
   const aggregate = aggregateSourceState(
-    recordsForSource(latestState.quickDownloads, manifest.sourceAid)
+    recordsForSource(latestState.quickDownloads, manifest.sourceAid, flight.batchId)
   );
   const firstDownloadId = results.find((result) => Number.isInteger(result?.downloadId))?.downloadId;
   if (aggregate.state === "complete") {
@@ -619,7 +500,7 @@ async function startQuickDownload(request, flight) {
       state: "error",
       downloadId: firstDownloadId,
       message: manifest.isCollection
-        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，点击可只重试失败项。`
+        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，再次点击会重新下载全话。`
         : results.find((result) => result?.ok === false)?.message || "下载创建失败。"
     };
   }
@@ -629,7 +510,7 @@ async function startQuickDownload(request, flight) {
     downloadId: firstDownloadId,
     message: manifest.isCollection
       ? `合集已开始下载（${aggregate.total} 个文件）。`
-      : activeKeys.size > 0 ? "该漫画正在下载。" : "下载已开始。"
+      : "下载已开始。"
   };
 }
 
@@ -650,6 +531,7 @@ async function startDownloadItem({ item, manifest, request, comicName, flight })
 
   const metadata = {
     ...item,
+    batchId: flight.batchId,
     aid: item.downloadAid,
     sourceAid: manifest.sourceAid,
     sourceTitle: request.title,
@@ -667,7 +549,7 @@ async function startDownloadItem({ item, manifest, request, comicName, flight })
     });
     await mutateAppState((state) => {
       const current = state.quickDownloads.find(
-        (record) => recordKeyFor(record) === item.recordKey
+        (record) => sameQuickTask(record, metadata)
       );
       const record = {
         ...(current || metadata),
@@ -680,7 +562,7 @@ async function startDownloadItem({ item, manifest, request, comicName, flight })
       };
       state.quickDownloads = current
         ? state.quickDownloads.map((entry) =>
-            recordKeyFor(entry) === item.recordKey ? record : entry
+            sameQuickTask(entry, metadata) ? record : entry
           )
         : [...state.quickDownloads, record];
       addActivity(state, "info", `已开始一键下载：${relativePath}`);
@@ -700,20 +582,23 @@ async function startDownloadItem({ item, manifest, request, comicName, flight })
   return { ok: true, state: "downloading", downloadId };
 }
 
-async function markStartFailure(item, comicName, manifest, error) {
+async function markStartFailure(item, comicName, manifest, batchId, error) {
   const message = readableDownloadException(error);
   await mutateAppState((state) => {
+    const identity = { ...item, batchId };
     const current = state.quickDownloads.find(
-      (record) => recordKeyFor(record) === item.recordKey
+      (record) => sameQuickTask(record, identity)
     );
     const failedAt = new Date().toISOString();
     const record = {
       ...(current || item),
       ...item,
+      batchId,
       aid: item.downloadAid,
       sourceAid: manifest.sourceAid,
       comicName,
       collectionTotal: manifest.total,
+      downloadMethod: "quick",
       status: "failed",
       downloadId: null,
       actualFilePath: null,
@@ -722,7 +607,7 @@ async function markStartFailure(item, comicName, manifest, error) {
     };
     state.quickDownloads = current
       ? state.quickDownloads.map((entry) =>
-          recordKeyFor(entry) === item.recordKey ? record : entry
+          sameQuickTask(entry, identity) ? record : entry
         )
       : [...state.quickDownloads, record];
     addActivity(state, "error", `一键下载创建失败“${item.title}”：${message}`);
@@ -784,7 +669,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
   const finalizedAt = new Date().toISOString();
   const latestState = await mutateAppState((state) => {
     const current = state.quickDownloads.find(
-      (item) => recordKeyFor(item) === recordKeyFor(metadata)
+      (item) => sameQuickTask(item, metadata)
     );
     const alreadyFinal =
       current?.downloadId === downloadId &&
@@ -792,6 +677,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
     const record = {
       ...(current || metadata),
       aid: metadata.aid,
+      batchId: metadata.batchId || null,
       recordKey: recordKeyFor(metadata),
       sourceAid: sourceAidFor(metadata),
       downloadAid: metadata.downloadAid || metadata.aid,
@@ -800,6 +686,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
       relativePath: metadata.relativePath,
       actualFilePath,
       downloadId,
+      downloadMethod: "quick",
       status: completed ? "downloaded" : "failed",
       downloadedAt: completed ? finalizedAt : current?.downloadedAt,
       failedAt: completed ? current?.failedAt : finalizedAt,
@@ -807,7 +694,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
     };
     state.quickDownloads = current
       ? state.quickDownloads.map((item) =>
-          recordKeyFor(item) === recordKeyFor(metadata) ? record : item
+          sameQuickTask(item, metadata) ? record : item
         )
       : [...state.quickDownloads, record];
     if (completed) {
@@ -845,8 +732,11 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
   });
 
   const aggregate = aggregateSourceState(
-    recordsForSource(latestState.quickDownloads, sourceAidFor(metadata))
+    recordsForSource(latestState.quickDownloads, sourceAidFor(metadata), metadata.batchId)
   );
+  const isLatestBatch = recordsForSource(
+    latestState.quickDownloads, sourceAidFor(metadata)
+  ).some((record) => sameQuickTask(record, metadata));
   const isCollection = Boolean(metadata.isCollection || aggregate.total > 1);
   const message = aggregate.state === "complete"
     ? isCollection
@@ -854,14 +744,14 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
       : "下载完成。"
     : aggregate.state === "error"
       ? isCollection
-        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，点击可只重试失败项。`
+        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，再次点击会重新下载全话。`
         : `下载失败：${finalError || "未知原因"}`
       : `正在下载（${aggregate.completed}/${aggregate.total}）。`;
   const tabIds = mergeTabIds(
     metadata.tabIds,
     startFlights.get(sourceAidFor(metadata))?.tabIds
   );
-  if (aggregate.state === "complete" || aggregate.state === "error") {
+  if (isLatestBatch && (aggregate.state === "complete" || aggregate.state === "error")) {
     for (const tabId of tabIds) {
       await chrome.tabs.sendMessage(tabId, {
         type: QUICK_DOWNLOAD_STATUS,
@@ -890,7 +780,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
 async function markRecoveryFailure(record, reason) {
   await mutateAppState((state) => {
     const current = state.quickDownloads.find(
-      (item) => recordKeyFor(item) === recordKeyFor(record)
+      (item) => sameQuickTask(item, record)
     );
     if (!current || current.status !== "downloading") return;
     current.status = "failed";
@@ -972,16 +862,10 @@ async function quickDownloadStates(message, sender) {
   await ensureRecovery();
   const state = await loadAppState();
   const result = {};
-  const localIndexes = new Map();
   for (const aid of aids) {
     const records = recordsForSource(state.quickDownloads, aid);
     const aggregate = aggregateSourceState(records);
-    if (aggregate.state === "complete") {
-      const existing = await Promise.all(records.map((record) =>
-        completedQuickDownloadExists(record, localIndexes)
-      ));
-      result[aid] = existing.every(Boolean) ? "complete" : "error";
-    } else if (aggregate.state !== "idle") {
+    if (aggregate.state !== "idle") {
       result[aid] = aggregate.state;
     }
   }
