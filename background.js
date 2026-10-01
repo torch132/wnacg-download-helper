@@ -1,4 +1,5 @@
 import {
+  WnacgParseError,
   deriveComicName,
   findLongestPrefixMatch,
   isAllowedDownloadUrl,
@@ -118,32 +119,53 @@ async function fetchText(url) {
   }
 }
 
-async function resolveDownloadItems({ aid, title }) {
+function collectionChapterPageUrl(sourceAid, page) {
+  const url = new URL("https://www.wnacg.com/");
+  url.search = new URLSearchParams({
+    ctl: "download",
+    act: "chapters",
+    sid: sourceAid,
+    page: String(page)
+  });
+  return url.href;
+}
+
+async function resolveDownloadItems({ aid, title, isCollection }) {
   const downloadPageUrl = `https://www.wnacg.com/download-index-aid-${aid}.html`;
   const html = await fetchText(downloadPageUrl);
   const officialTitle = parseDownloadTitleText(html) || title;
-  const manifest = parseDownloadItemsText(html, {
-    sourceAid: aid,
-    sourceTitle: title,
-    pageUrl: downloadPageUrl
-  });
-  const items = [...manifest.items];
+  let manifest;
+  try {
+    manifest = parseDownloadItemsText(html, {
+      sourceAid: aid,
+      sourceTitle: title,
+      pageUrl: downloadPageUrl
+    });
+  } catch (error) {
+    if (!isCollection || !(error instanceof WnacgParseError)) throw error;
+  }
+  let items = manifest ? [...manifest.items] : [];
+  let firstApiPage = manifest?.isCollection &&
+    items.length < Math.min(manifest.total, manifest.limit) ? 1 : 2;
+
+  if (isCollection && !manifest?.isCollection) {
+    // 卡片明确标为合集时，不能因下载页缺少章节容器而误下父 aid 的单个 ZIP。
+    manifest = parseCollectionChapterPage(
+      await fetchText(collectionChapterPageUrl(aid, 1)),
+      { sourceAid: aid }
+    );
+    items = [...manifest.items];
+    firstApiPage = 2;
+  }
 
   if (manifest.isCollection) {
     const pageCount = Math.ceil(manifest.total / Math.max(1, manifest.limit));
     // 页面章节行不完整时先请求接口第一页，避免把缺失的话数当作已下载。
-    const firstApiPage = items.length < Math.min(manifest.total, manifest.limit) ? 1 : 2;
     for (let page = firstApiPage; page <= pageCount; page += 1) {
-      const pageUrl = new URL("https://www.wnacg.com/");
-      pageUrl.search = new URLSearchParams({
-        ctl: "download",
-        act: "chapters",
-        sid: manifest.sourceAid,
-        page: String(page)
-      });
-      const result = parseCollectionChapterPage(await fetchText(pageUrl.href), {
-        sourceAid: manifest.sourceAid
-      });
+      const result = parseCollectionChapterPage(
+        await fetchText(collectionChapterPageUrl(manifest.sourceAid, page)),
+        { sourceAid: manifest.sourceAid }
+      );
       items.push(...result.items);
     }
   }

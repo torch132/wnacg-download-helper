@@ -198,7 +198,7 @@ function createEnvironment({
       return {
         ok: true,
         text: async () => collection && aid === String(collection.sourceAid)
-          ? collectionDownloadPage(collection)
+          ? collection.pageHtml ?? collectionDownloadPage(collection)
           : downloadPage(aid, pageTitle || `测试漫画 ${aid}話`)
       };
     }
@@ -661,6 +661,66 @@ test("合集一键下载按子章节保存多个 ZIP，全部完成后才通知�
   assert.equal(env.sentMessages[0].message.aid, sourceAid);
   assert.equal(env.sentMessages[0].message.state, "complete");
   assert.match(env.sentMessages[0].message.message, /3 个文件/);
+});
+
+test("卡片标注合集而下载页缺少章节容器时，从接口补齐全话并存入同一目录", async () => {
+  const sourceAid = "390800";
+  const chapter = (aid, title) => ({
+    id: aid,
+    name: title,
+    dl2: `https://dl1.wn01.download/down/${aid}/${aid}.zip`
+  });
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      pageHtml: "<title>合集父容器</title><div>章节由接口载入</div>",
+      items: [],
+      total: 3,
+      limit: 2,
+      pages: {
+        1: { code: 0, sid: sourceAid, total: 3, limit: 2, page: 1,
+          list: [chapter("390801", "合集测试 1話"), chapter("390802", "合集测试 2話")] },
+        2: { code: 0, sid: sourceAid, total: 3, limit: 2, page: 2,
+          list: [chapter("390803", "合集测试 3話")] }
+      }
+    }
+  });
+  await importBackground("collection-card-api-fallback");
+
+  const result = await env.send(sourceAid, 70, undefined, "合集测试", true);
+  assert.equal(result.state, "downloading");
+  assert.equal(env.downloadCalls, 3);
+  assert.deepEqual(env.downloadOptions.map((item) => item.filename), [
+    "合集测试/合集测试 1話.zip",
+    "合集测试/合集测试 2話.zip",
+    "合集测试/合集测试 3話.zip"
+  ]);
+  assert.deepEqual(env.fetchUrls.slice(1), [
+    `https://www.wnacg.com/?ctl=download&act=chapters&sid=${sourceAid}&page=1`,
+    `https://www.wnacg.com/?ctl=download&act=chapters&sid=${sourceAid}&page=2`
+  ]);
+  assert.ok(env.local.wnacgStateV1.quickDownloads.every((item) =>
+    item.recordKey.startsWith(`bundle:${sourceAid}:`)));
+});
+
+test("卡片标注合集但章节接口无效时不误下父 ZIP", async () => {
+  const sourceAid = "390810";
+  const env = createEnvironment({
+    collection: {
+      sourceAid,
+      pageHtml: downloadPage(sourceAid, "合集父容器"),
+      items: [],
+      total: 2,
+      pages: { 1: { code: 1, list: [] } }
+    }
+  });
+  await importBackground("collection-card-invalid-api");
+
+  const result = await env.send(sourceAid, 71, undefined, "合集测试", true);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /合集章节分页响应格式无效/);
+  assert.equal(env.downloadCalls, 0);
+  assert.deepEqual(env.local.wnacgStateV1.quickDownloads, []);
 });
 
 test("旧独立话的一键下载文件已存在时，合集不重复下载同一子话", async () => {
