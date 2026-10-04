@@ -2,6 +2,7 @@ import {
   extractChapterLabel,
   hasZipSignature,
   normalizeTitle,
+  parseUncensoredVersion,
   sanitizeFileName,
   truncateUtf8
 } from "./core.js";
@@ -86,6 +87,19 @@ export async function ensureLibraryPermission(handle, request = false) {
   return false;
 }
 
+export async function ensureLibraryWritePermission(handle, request = false) {
+  if (!handle) return false;
+  try {
+    const options = { mode: "readwrite" };
+    const current = await handle.queryPermission(options);
+    if (current === "granted") return true;
+    return Boolean(request && current === "prompt" &&
+      await handle.requestPermission(options) === "granted");
+  } catch {
+    return false;
+  }
+}
+
 function normalizedArchiveStem(fileName) {
   return normalizeTitle(String(fileName).replace(/\.zip$/iu, ""))
     .replace(/ \(\d+\)$/u, "");
@@ -96,15 +110,16 @@ function normalizeChapterIdentity(label) {
 }
 
 function chapterIdentity(title, comicName) {
-  const normalized = normalizeTitle(title);
-  // 版本标签不参与话数提取，但必须在两侧完全一致，防止 DL/无修正等误并。
-  const tags = normalized.match(/(?:\s*\[[^\]]+\])+$/u)?.[0] || "";
-  const withoutTags = tags ? normalized.slice(0, -tags.length).trim() : normalized;
+  const { text: withoutMarker, uncensored } = parseUncensoredVersion(title, comicName);
+  // 除无修正外，其他版本标签仍必须逐字一致。
+  const tags = withoutMarker.match(/(?:\s*\[[^\]]+\])+$/u)?.[0] || "";
+  const withoutTags = tags ? withoutMarker.slice(0, -tags.length).trim() : withoutMarker;
   return {
     label: normalizeChapterIdentity(
       extractChapterLabel(withoutTags, { seriesPrefix: comicName }) || ""
     ),
-    tags: tags.replace(/\s+/gu, "")
+    tags: tags.replace(/\s+/gu, ""),
+    uncensored
   };
 }
 
@@ -116,7 +131,7 @@ function aidFromArchiveStem(stem) {
  * 只读取授权漫画库的第一层漫画文件夹及其中 ZIP；不进入子目录、不写入文件。
  * 返回 Map<漫画名, Array<{fileName, relativePath, size, stem, aid, chapter}>>。
  */
-export async function scanLocalArchiveIndex(rootHandle, comicNames = []) {
+export async function scanLocalArchiveIndex(rootHandle, comicNames = [], source = "library") {
   if (!rootHandle) throw new Error("尚未选择本地漫画库目录。");
   const index = new Map();
   for (const comicName of new Set(comicNames.map((name) => String(name).trim()).filter(Boolean))) {
@@ -146,6 +161,8 @@ export async function scanLocalArchiveIndex(rootHandle, comicNames = []) {
           fileName: handle.name,
           relativePath: `${folderName}/${handle.name}`,
           size: file.size,
+          lastModified: file.lastModified,
+          source,
           stem,
           aid: aidFromArchiveStem(stem),
           chapter: chapterIdentity(stem, comicName)
@@ -165,17 +182,51 @@ export function findLocalArchive(index, comicName, title, aid) {
   if (exact) return { ...exact, matchKind: "title" };
 
   const strongAid = String(aid ?? "").trim();
+  const chapter = chapterIdentity(title, comicName);
   if (/^\d+$/u.test(strongAid)) {
-    const aidMatch = archives.find((archive) => archive.aid === strongAid);
+    const aidMatch = archives.find((archive) => archive.aid === strongAid &&
+      (!chapter.uncensored || archive.chapter.uncensored));
     if (aidMatch) return { ...aidMatch, matchKind: "aid" };
   }
 
-  const chapter = chapterIdentity(title, comicName);
   if (!chapter.label) return null;
   const matches = archives.filter((archive) =>
-    archive.chapter.label === chapter.label && archive.chapter.tags === chapter.tags
+    archive.chapter.label === chapter.label && archive.chapter.tags === chapter.tags &&
+    archive.chapter.uncensored === chapter.uncensored
   );
   return matches.length === 1 ? { ...matches[0], matchKind: "chapter" } : null;
+}
+
+export function findUncensoredReplacement(index, comicName, title) {
+  const target = chapterIdentity(title, comicName);
+  if (!target.uncensored || !target.label) return null;
+  const matches = (index?.get?.(String(comicName).trim()) || []).filter((archive) =>
+    archive.chapter.label === target.label && archive.chapter.tags === target.tags &&
+    !archive.chapter.uncensored && !archive.aid
+  );
+  return matches.length === 1 ? { ...matches[0], matchKind: "replacement" } : null;
+}
+
+export async function removeLocalArchive(rootHandle, archive) {
+  if (!rootHandle || !archive || !Number.isInteger(archive.size)) {
+    throw new Error("无法确认待替换的本地 ZIP。");
+  }
+  const [folderName, fileName, ...extra] = String(archive.relativePath || "").split("/");
+  if (extra.length || !folderName || fileName !== archive.fileName ||
+      !/\.zip$/iu.test(fileName)) {
+    throw new Error("待替换 ZIP 路径无效，已取消删除。");
+  }
+  const directory = await rootHandle.getDirectoryHandle(folderName, { create: false });
+  const handle = await directory.getFileHandle(fileName, { create: false });
+  const file = await handle.getFile();
+  const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (file.size !== archive.size ||
+      (Number.isFinite(archive.lastModified) && file.lastModified !== archive.lastModified) ||
+      !hasZipSignature(signature) ||
+      signature[2] !== 0x03 || signature[3] !== 0x04) {
+    throw new Error("原 ZIP 已变化，已取消删除。");
+  }
+  await directory.removeEntry(fileName);
 }
 
 export async function queryDirectoryPermission(handle) {
@@ -271,6 +322,9 @@ export async function writeZipResponse({
       written += value.byteLength;
       onProgress?.({ written, total });
     }
+    if (total && written !== total) {
+      throw new Error(`ZIP 下载不完整：预期 ${total} 字节，实际 ${written} 字节。`);
+    }
     await writable.close();
   } catch (error) {
     await writable.abort().catch(() => {});
@@ -284,4 +338,15 @@ export async function writeZipResponse({
     relativePath: `${directoryName}/${fileName}`,
     bytesWritten: written
   };
+}
+
+export async function writeZipReplacingArchive({ replacement, replacementRootHandle, ...download }) {
+  const written = await writeZipResponse(download);
+  if (!replacement) return { ...written, replacementCleanupError: null };
+  try {
+    await removeLocalArchive(replacementRootHandle, replacement);
+    return { ...written, replacementCleanupError: null };
+  } catch (error) {
+    return { ...written, replacementCleanupError: error };
+  }
 }

@@ -42,6 +42,19 @@ export function normalizeTitle(value) {
     .toLocaleLowerCase("zh-Hans-CN");
 }
 
+const UNCENSORED_MARKER_PATTERN = /\[\s*[无無]修正(?:版)?\s*\]|(?<=^|\s|話|话)[无無]修正(?:版)?(?=\s|$)/gu;
+
+export function parseUncensoredVersion(title, comicName = "") {
+  const normalized = normalizeTitle(title);
+  const prefix = normalizeTitle(comicName);
+  const chapterText = prefix && normalized.startsWith(prefix)
+    ? normalized.slice(prefix.length).trim() : normalized;
+  return {
+    uncensored: Boolean(chapterText.match(UNCENSORED_MARKER_PATTERN)),
+    text: chapterText.replace(UNCENSORED_MARKER_PATTERN, " ").replace(/\s+/gu, " ").trim()
+  };
+}
+
 const TITLE_TAG_PATTERN = /(\[中国翻訳\]|\[DL版\]|\[無修正\])/gu;
 
 export function splitTitleTags(value) {
@@ -684,20 +697,26 @@ function mergeEquivalentChapterUpdates(first, second) {
   const secondPriority = UPDATE_STATUS_PRIORITY[second.status] || 0;
   const checked = [first, second].filter((item) => item.localCheckedAt);
   const found = checked.find((item) => item.localFilePresent);
-  const preferred = found || (checked.length === 2 ? bundle : checked[0]) ||
+  const firstUncensored = parseUncensoredVersion(first.title, first.comicName).uncensored;
+  const secondUncensored = parseUncensoredVersion(second.title, second.comicName).uncensored;
+  const upgraded = firstUncensored === secondUncensored ? null
+    : firstUncensored ? first : second;
+  const preferred = upgraded || found || (checked.length === 2 ? bundle : checked[0]) ||
     (firstPriority > secondPriority ? first
       : secondPriority > firstPriority ? second : bundle);
+  const identity = upgraded || bundle;
   const merged = {
     ...first,
     ...second,
-    ...bundle,
+    ...identity,
     status: preferred.status,
     selected: [UPDATE_STATUS.DOWNLOADED, UPDATE_STATUS.IGNORED].includes(preferred.status)
       ? false : Boolean(preferred.selected),
     detectedAt: preferred.detectedAt || bundle.detectedAt || first.detectedAt,
     error: preferred.status === UPDATE_STATUS.DOWNLOADED ? null : preferred.error || null,
     filePath: preferred.filePath || null,
-    downloadMethod: preferred.downloadMethod || null
+    downloadMethod: preferred.downloadMethod || null,
+    replacement: preferred.replacement || null
   };
   for (const field of ["filePath", "downloadedAt", "bytesWritten", "downloadMethod"]) {
     if (preferred[field] != null) merged[field] = preferred[field];
@@ -720,6 +739,7 @@ export function createUpdateCandidates({
   watchItems = [],
   existingRecords = [],
   findLocalArchive = null,
+  findLocalReplacement = null,
   detectedAt = new Date().toISOString(),
 } = {}) {
   // 原始历史记录不做合并或裁剪；重复只在界面投影中折叠。
@@ -762,6 +782,18 @@ export function createUpdateCandidates({
           updated.filePath = archive.relativePath;
           updated.downloadMethod = "local";
           updated.error = null;
+          updated.replacement = null;
+        } else if (findLocalReplacement) {
+          const replacement = findLocalReplacement(updated.comicName, updated.title);
+          if (replacement) {
+            if (updated.status === UPDATE_STATUS.DOWNLOADED && !updated.previousFilePath) {
+              updated.previousFilePath = updated.filePath || null;
+            }
+            updated.replacement = replacement;
+            updated.status = UPDATE_STATUS.PENDING;
+            updated.selected = true;
+            updated.error = null;
+          }
         }
       }
       records[index] = updated;
@@ -796,6 +828,8 @@ export function createUpdateCandidates({
         candidate.selected = false;
         candidate.filePath = archive.relativePath;
         candidate.downloadMethod = "local";
+      } else if (findLocalReplacement) {
+        candidate.replacement = findLocalReplacement(candidate.comicName, candidate.title);
       }
     }
     const pendingIndex = added.findIndex((record) =>
@@ -816,7 +850,7 @@ export function createUpdateCandidates({
   };
 }
 
-export function filterAlbumsAfterBaselines(albums = [], watchItems = []) {
+export function filterAlbumsAfterBaselines(albums = [], watchItems = [], includeOlder = null) {
   return albums.filter((album) => {
     const watchItem =
       watchItems.find((item) => item?.id && item.id === album?.watchId) ||
@@ -827,8 +861,13 @@ export function filterAlbumsAfterBaselines(albums = [], watchItems = []) {
     );
     const baselineAid = Number(watchItem?.baselineAid);
     if (!Number.isFinite(aid) || !Number.isFinite(baselineAid)) return false;
-    if (!album?.isCollection) return aid > baselineAid;
-    if (aid !== baselineAid) return aid > baselineAid;
+    if (!album?.isCollection) {
+      return aid > baselineAid || Boolean(includeOlder?.(album, watchItem));
+    }
+    if (aid !== baselineAid) {
+      return aid > baselineAid || Boolean(includeOlder?.(album, watchItem));
+    }
+    if (includeOlder?.(album, watchItem)) return true;
     if (Array.isArray(watchItem.collectionBaselineChapterIds)) {
       const knownIds = new Set(watchItem.collectionBaselineChapterIds.map(String));
       return !knownIds.has(String(album?.downloadAid || album?.aid));

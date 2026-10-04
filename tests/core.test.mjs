@@ -507,6 +507,68 @@ test("旧独立话与合集子话合并为同一进度并保留成功文件", ()
   assert.equal(samePage.records[0].recordKey, bundle.recordKey);
 });
 
+test("同 aid 无修正版可重新入队，旧独立话历史仍保留", () => {
+  const watch = { id: "comic", prefix: "作品", baselineAid: "500", enabled: true };
+  const replacement = {
+    fileName: "作品 33-55話.zip", relativePath: "作品/作品 33-55話.zip",
+    size: 5, source: "library"
+  };
+  const album = {
+    aid: "500", recordKey: "bundle:600:500", downloadAid: "500",
+    sourceAid: "600", isCollection: true, title: "作品 33-55話 [無修正]"
+  };
+  const old = {
+    aid: "500", recordKey: "album:500", watchId: "comic",
+    comicName: "作品", title: "作品 33-55話", status: "downloaded",
+    filePath: replacement.relativePath
+  };
+  const result = core.createUpdateCandidates({
+    albums: [album], watchItems: [watch], existingRecords: [old],
+    findLocalArchive: () => null,
+    findLocalReplacement: () => replacement
+  });
+  assert.equal(result.records.length, 2);
+  assert.deepEqual(result.records[0], old, "原下载记录不可删除或改写");
+  assert.equal(result.added[0].status, "pending");
+  assert.equal(result.added[0].replacement.relativePath, replacement.relativePath);
+  assert.equal(core.reconcileEquivalentChapterUpdates(result.records)[0].status, "pending",
+    "旧普通版历史不能把无修正版更新隐藏为已下载");
+  const oldBundle = { ...old, recordKey: "bundle:600:500", isCollection: true };
+  const newAlbum = { ...album, recordKey: "album:500", isCollection: false,
+    zipUrl: "https://dl1.wn01.download/new.zip" };
+  const reversed = core.createUpdateCandidates({
+    albums: [newAlbum], watchItems: [watch], existingRecords: [oldBundle],
+    findLocalArchive: () => null,
+    findLocalReplacement: () => replacement
+  });
+  const [reversedVisible] = core.reconcileEquivalentChapterUpdates(reversed.records);
+  assert.equal(reversedVisible.recordKey, "album:500",
+    "无修正版出现在独立话时必须选中其自身的下载记录");
+  assert.equal(reversedVisible.zipUrl, newAlbum.zipUrl);
+  assert.equal(reversedVisible.status, "pending");
+  const bothUncensored = core.reconcileEquivalentChapterUpdates([
+    { ...newAlbum, comicName: "作品", watchId: "comic", status: "downloaded",
+      localCheckedAt: "2026-10-04", localFilePresent: true,
+      filePath: "作品/作品 33-55話 [無修正].zip" },
+    { ...album, comicName: "作品", watchId: "comic", status: "pending",
+      localCheckedAt: "2026-10-04", localFilePresent: false }
+  ]);
+  assert.equal(bothUncensored[0].status, "downloaded",
+    "两条都是无修正版时仍应优先相信已核验的本地 ZIP");
+  const existing = core.createUpdateCandidates({
+    albums: [{ ...album, recordKey: "album:500" }],
+    watchItems: [watch], existingRecords: [old],
+    findLocalArchive: () => null,
+    findLocalReplacement: () => replacement
+  });
+  assert.equal(existing.records.length, 1);
+  assert.equal(existing.records[0].status, "pending");
+  assert.equal(existing.records[0].previousFilePath, replacement.relativePath);
+  assert.deepEqual(core.filterAlbumsAfterBaselines(
+    [{ aid: "500", title: album.title }], [watch], () => true
+  ).map((item) => item.aid), ["500"], "基线 aid 相同时仍应让明确的洗版候选进入队列");
+});
+
 test("连载合集以现有全部七话为基线，并按子 aid 集合找新增话", () => {
   const album = { aid: "390059", title: "连载合集" };
   const items = Array.from({ length: 7 }, (_, index) => ({

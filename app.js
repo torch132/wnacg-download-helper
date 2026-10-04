@@ -24,13 +24,15 @@ import {
   chooseLibraryDirectory,
   ensureDirectoryPermission,
   ensureLibraryPermission,
+  ensureLibraryWritePermission,
   findLocalArchive,
+  findUncensoredReplacement,
   getDirectoryHandle,
   getLibraryDirectoryHandle,
   queryDirectoryPermission,
   queryLibraryPermission,
   scanLocalArchiveIndex,
-  writeZipResponse
+  writeZipReplacingArchive
 } from "./file-system.js";
 import { addActivity, loadAppState, saveAppState, updateAppState } from "./storage.js";
 
@@ -163,10 +165,11 @@ async function importCurrentPageMatches(watches, collectionCache = new Map()) {
   );
   const isTagPage = buildTagPageScanPlan(currentPageSnapshot.url, MAX_TAG_SCAN_PAGES).length > 0;
   const result = createUpdateCandidates({
-    albums: isTagPage ? albums : filterAlbumsAfterBaselines(albums, watches),
+    albums: isTagPage ? albums : filterAlbumsAfterBaselines(albums, watches, hasLocalReplacement),
     watchItems: watches,
     existingRecords: state.updates,
     findLocalArchive: localArchiveFor,
+    findLocalReplacement: localReplacementFor,
     detectedAt: new Date().toISOString()
   });
   state.updates = result.records;
@@ -217,6 +220,7 @@ async function importCurrentTagPages(watches) {
       watchItems: watches,
       existingRecords: state.updates,
       findLocalArchive: localArchiveFor,
+      findLocalReplacement: localReplacementFor,
       detectedAt: new Date().toISOString()
     });
     state.updates = result.records;
@@ -495,6 +499,14 @@ function localArchiveFor(comicName, title, aid) {
   return localArchiveIndex && findLocalArchive(localArchiveIndex, comicName, title, aid);
 }
 
+function localReplacementFor(comicName, title) {
+  return localArchiveIndex && findUncensoredReplacement(localArchiveIndex, comicName, title);
+}
+
+function hasLocalReplacement(album, watch) {
+  return Boolean(localReplacementFor(watch.prefix, album.title));
+}
+
 async function refreshLocalArchiveIndex(requestPermission = false, extraComicNames = []) {
   localArchiveIndex = null;
   localArchiveCount = 0;
@@ -508,16 +520,18 @@ async function refreshLocalArchiveIndex(requestPermission = false, extraComicNam
   ];
   const index = await scanLocalArchiveIndex(
     libraryHandle,
-    comicNames
+    comicNames,
+    "library"
   );
   if (directoryHandle && await queryDirectoryPermission(directoryHandle) === "granted") {
     try {
-      const saveIndex = await scanLocalArchiveIndex(directoryHandle, comicNames);
+      const sameRoot = directoryHandle === libraryHandle ||
+        await directoryHandle.isSameEntry?.(libraryHandle);
+      const saveIndex = sameRoot ? new Map() :
+        await scanLocalArchiveIndex(directoryHandle, comicNames, "save");
       for (const [comicName, archives] of saveIndex) {
         const existing = index.get(comicName) || [];
-        index.set(comicName, [...existing, ...archives.filter((archive) =>
-          !existing.some((item) => item.relativePath === archive.relativePath)
-        )]);
+        index.set(comicName, [...existing, ...archives]);
       }
     } catch {
       // 保存目录是补充来源；外置卷暂时不可用不影响已授权漫画库的查重。
@@ -533,10 +547,12 @@ async function refreshLocalArchiveIndex(requestPermission = false, extraComicNam
   const checkedAt = new Date().toISOString();
   state.updates = state.updates.map((record) => {
     const archive = localArchiveFor(record.comicName, record.title, record.downloadAid || record.aid);
+    const replacement = localReplacementFor(record.comicName, record.title);
     const next = {
       ...record,
       localCheckedAt: checkedAt,
-      localFilePresent: Boolean(archive)
+      localFilePresent: Boolean(archive),
+      replacement: replacement || null
     };
     if (archive) {
       next.localFilePath = archive.relativePath;
@@ -546,6 +562,16 @@ async function refreshLocalArchiveIndex(requestPermission = false, extraComicNam
         ? record.filePath : archive.relativePath;
       next.downloadMethod = "local";
       next.error = null;
+      next.replacementCleanupError = replacement
+        ? record.replacementCleanupError ||
+          `无修正版已存在，但旧版 ${replacement.relativePath} 仍在；请手动清理。`
+        : null;
+    } else if (replacement) {
+      next.status = UPDATE_STATUS.PENDING;
+      next.selected = true;
+      next.error = null;
+    } else if (next.replacementCleanupError) {
+      next.replacementCleanupError = null;
     }
     return next;
   });
@@ -804,6 +830,7 @@ async function scanForUpdates() {
         watchItems: [watch],
         existingRecords: state.updates,
         findLocalArchive: localArchiveFor,
+        findLocalReplacement: localReplacementFor,
         detectedAt: new Date().toISOString()
       });
       state.updates = result.records;
@@ -824,7 +851,7 @@ async function scanForUpdates() {
       setScanProgress(page, MAX_SCAN_PAGES, "正在读取韩漫/汉化栏目");
       const albums = await loadAlbumPage(page);
       const expandedAlbums = await expandMatchedCollections(albums, watches, collectionCache);
-      const eligibleAlbums = filterAlbumsAfterBaselines(expandedAlbums, watches);
+      const eligibleAlbums = filterAlbumsAfterBaselines(expandedAlbums, watches, hasLocalReplacement);
       for (const album of expandedAlbums) {
         if (!album.isCollection) continue;
         const watch = watches.find((item) => item.id === album.watchId) ||
@@ -855,6 +882,7 @@ async function scanForUpdates() {
         watchItems: watches,
         existingRecords: state.updates,
         findLocalArchive: localArchiveFor,
+        findLocalReplacement: localReplacementFor,
         detectedAt: new Date().toISOString()
       });
       state.updates = result.records;
@@ -1002,6 +1030,11 @@ async function retryFailed() {
 
 async function downloadSelected() {
   if (busy) return;
+  if (state.updates.some((record) => record.selected && record.replacement?.source === "library") &&
+      !await ensureLibraryWritePermission(libraryHandle, true)) {
+    showToast("替换无修正版需要对旧 ZIP 所在漫画库授予写入权限；原文件不会被删除。", "warning");
+    return;
+  }
   setBusy(true, "正在核对本地文件…");
   try {
     if (!await refreshLocalArchiveIndex(true)) {
@@ -1026,6 +1059,12 @@ async function downloadSelected() {
   if (!permission) {
     await refreshDirectoryStatus();
     showToast("请先选择并授权目标目录。", "warning");
+    setBusy(false);
+    return;
+  }
+  if (selected.some((record) => record.replacement?.source === "library") &&
+      !await ensureLibraryWritePermission(libraryHandle, false)) {
+    showToast("漫画库需要写入授权才能替换旧版；请再次点击下载并完成授权。", "warning");
     setBusy(false);
     return;
   }
@@ -1080,8 +1119,13 @@ async function downloadSelected() {
         });
       }
       const response = await fetch(zipUrl, { cache: "no-store", credentials: "omit" });
-      const written = await writeZipResponse({
+      const replacement = record.replacement;
+      const replacementRootHandle = replacement?.source === "library" ? libraryHandle
+        : replacement?.source === "save" ? directoryHandle : null;
+      const written = await writeZipReplacingArchive({
         rootHandle: directoryHandle,
+        replacement,
+        replacementRootHandle,
         comicName: record.comicName,
         title: record.title,
         aid: record.aid,
@@ -1089,16 +1133,25 @@ async function downloadSelected() {
         onProgress: ({ written: bytes, total }) =>
           setDownloadProgress(index, selected.length, record.title, bytes, total)
       });
+      const replacementCleanupError = written.replacementCleanupError
+        ? `新版已下载，但旧版 ${replacement.relativePath} 删除失败：${readableError(written.replacementCleanupError)}`
+        : null;
       record = transitionUpdate(record, UPDATE_STATUS.DOWNLOADED, {
         downloadedAt: new Date().toISOString(),
         filePath: written.relativePath,
         bytesWritten: written.bytesWritten,
         localCheckedAt: new Date().toISOString(),
         localFilePresent: true,
-        localFilePath: written.relativePath
+        localFilePath: written.relativePath,
+        replacedFilePath: replacement?.relativePath || record.replacedFilePath || null,
+        replacement: replacementCleanupError ? replacement : null,
+        replacementCleanupError
       });
       replaceUpdate(record);
-      addActivity(state, "success", `已下载：${written.relativePath}`);
+      addActivity(state, replacementCleanupError ? "warning" : "success",
+        replacementCleanupError || (replacement
+          ? `已下载无修正版并替换：${replacement.relativePath} → ${written.relativePath}`
+          : `已下载：${written.relativePath}`));
       succeeded += 1;
     } catch (error) {
       record = transitionUpdate(record, UPDATE_STATUS.FAILED, {
@@ -1268,6 +1321,12 @@ function renderUpdateRow(record) {
   copy.append(titleLink);
   if (record.filePath) copy.append(textElement("span", record.filePath, "file-path"));
   if (record.error) copy.append(textElement("span", record.error, "update-error"));
+  if (record.replacement && record.status !== UPDATE_STATUS.DOWNLOADED) {
+    copy.append(textElement("span", `将替换：${record.replacement.relativePath}`, "file-path"));
+  }
+  if (record.replacementCleanupError) {
+    copy.append(textElement("span", record.replacementCleanupError, "update-error"));
+  }
   row.append(
     checkboxLabel,
     copy,

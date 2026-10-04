@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.10");
+  assert.equal(manifest.version, "1.5.11");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -134,6 +134,16 @@ test("侧栏以本地 ZIP 核对待下载项，原始进度只做显示折叠", 
   assert.match(app, /function visibleUpdates\(\)\s*\{\s*return reconcileEquivalentChapterUpdates\(state\.updates\)/s);
   assert.doesNotMatch(app, /state\.updates\s*=\s*reconcileEquivalentChapterUpdates\(state\.updates\)/);
   assert.doesNotMatch(app, /state\.updates = state\.updates\.filter\(\(item\) => item\.watchId !== id\)/);
+});
+
+test("无修正版替换仅由侧栏触发，并在删除失败时显示警告", async () => {
+  const [app, background] = await Promise.all([read("app.js"), read("background.js")]);
+  assert.match(app, /findLocalReplacement: localReplacementFor/g);
+  assert.match(app, /filterAlbumsAfterBaselines\(expandedAlbums, watches, hasLocalReplacement\)/);
+  assert.match(app, /ensureLibraryWritePermission\(libraryHandle, true\)/);
+  assert.match(app, /writeZipReplacingArchive\(\{/);
+  assert.match(app, /record\.replacementCleanupError/);
+  assert.doesNotMatch(background, /writeZipReplacingArchive|removeLocalArchive/);
 });
 
 test("界面使用 Catppuccin Latte 和 Mocha 自动亮暗主题", async () => {

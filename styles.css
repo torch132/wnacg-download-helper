@@ -811,6 +811,7 @@ input[type="checkbox"] {
 .update-error {
   display: block;
   margin-top: 3px;
+  overflow-wrap: anywhere;
   color: var(--danger);
   font-size: 11px;
 }
