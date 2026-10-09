@@ -1147,7 +1147,7 @@ test("合集一键下载完成会同步并合并旧独立话的失败进度", as
   assert.equal(env.local.wnacgStateV1.updates[1].error, null);
 });
 
-test("连载合集再次点击时重新下载当前全部子章节", async () => {
+test("合集新增章节时复用已完成批次，只下载新增子章节", async () => {
   const sourceAid = "390059";
   const items = Array.from({ length: 7 }, (_, index) => ({
     aid: String(390101 + index),
@@ -1189,17 +1189,27 @@ test("连载合集再次点击时重新下载当前全部子章节", async () =>
   collection.pages[1] = chapterPage([...items, eighth]);
   const second = await env.send(sourceAid, 66, undefined, "连载合集", false);
   assert.equal(second.state, "downloading");
-  assert.equal(env.downloadCalls, 8, "新批次同样只启动第一话");
-  await finishChapters(env, 908, 8);
-  assert.equal(env.downloadCalls, 15, "再次点击应下载当前全部八话");
+  assert.equal(env.downloadCalls, 8, "新增章节只启动新增的第八话");
+  await finishChapter(env, 908);
+  assert.equal(env.downloadCalls, 8, "已完成的前七话不应重复创建下载任务");
   assert.equal(env.downloadOptions.at(-1).filename, "连载合集/连载合集 8話.zip");
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 15,
-    "首轮七话历史必须保留");
-  assert.notEqual(env.local.wnacgStateV1.quickDownloads[0].batchId,
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 8,
+    "新增章节应追加到原批次，历史记录不重复生成");
+  assert.equal(env.local.wnacgStateV1.quickDownloads[0].batchId,
     env.local.wnacgStateV1.quickDownloads[7].batchId);
+
+  const third = await env.send(sourceAid, 66, undefined, "连载合集", false);
+  assert.equal(third.state, "downloading");
+  assert.equal(env.downloadCalls, 9,
+    "全部完成且没有新增章节时，主动再次点击仍创建新的下载批次");
+  assert.notEqual(
+    env.local.wnacgStateV1.quickDownloads[0].batchId,
+    env.local.wnacgStateV1.quickDownloads[8].batchId
+  );
+  await finishChapter(env, 909);
 });
 
-test("合集部分失败后再次点击仍重新下载全部子项", async () => {
+test("合集部分失败后再次点击从未完成子项续传", async () => {
   const sourceAid = "388290";
   const items = [
     { aid: "220001", title: "重试合集 1話" },
@@ -1230,18 +1240,21 @@ test("合集部分失败后再次点击仍重新下载全部子项", async () =>
   const retry = await env.send(sourceAid, 62, undefined, "重试合集", true);
   assert.equal(retry.state, "downloading");
   assert.equal(env.downloadCalls, 3);
-  await finishChapters(env, 903, 3);
-  assert.equal(env.downloadCalls, 5, "再次点击应为三话都创建新任务");
+  await finishChapters(env, 903, 2);
+  assert.equal(env.downloadCalls, 4, "续传只应为失败和暂停的两话创建任务");
   assert.deepEqual(env.downloadOptions.slice(2).map((item) => item.filename),
-    items.map((item) => `重试合集/${item.title}.zip`));
+    items.slice(1).map((item) => `重试合集/${item.title}.zip`));
   await waitFor(
     () => env.sentMessages.at(-1)?.message.state === "complete",
     "失败子项重试成功后父按钮应完成"
   );
-  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 6);
-  assert.equal(env.local.wnacgStateV1.quickDownloads[1].status, "failed");
-  assert.ok(env.local.wnacgStateV1.quickDownloads.slice(3)
-    .every((item) => item.status === "downloaded"));
+  assert.equal(env.local.wnacgStateV1.quickDownloads.length, 3);
+  assert.ok(env.local.wnacgStateV1.quickDownloads.every((item) => item.status === "downloaded"));
+  assert.equal(
+    new Set(env.local.wnacgStateV1.quickDownloads.map((item) => item.batchId)).size,
+    1,
+    "续传应复用原批次，不新增历史批次"
+  );
 });
 
 test("超过 30 话的合集会读取分页接口并下载完整清单", async () => {

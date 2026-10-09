@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.12");
+  assert.equal(manifest.version, "1.5.13");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -225,6 +225,9 @@ test("列表页下载图标注入日期区域并通过后台保存到漫画目�
   assert.match(background, /chrome\.downloads\.onChanged/);
   assert.match(background, /startFlights/);
   assert.match(background, /recoverQuickDownloads/);
+  assert.match(background, /resumeCollectionBatch/);
+  assert.match(background, /collectionBatchNeedsResume/);
+  assert.match(background, /将从未完成话数继续/);
   assert.match(background, /chrome\.downloads\.removeFile/);
   assert.match(background, /state\.quickDownloads/);
   assert.match(background, /mutateAppState/);

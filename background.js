@@ -526,9 +526,95 @@ async function pauseCollectionQueue(sourceAid, batchId, reason) {
       type: QUICK_DOWNLOAD_STATUS,
       aid: String(sourceAid),
       state: "error",
-      message: `合集下载已暂停，已完成 ${aggregate.completed}/${aggregate.total}；再次点击会重新下载全话。`
+      message: `合集下载已暂停，已完成 ${aggregate.completed}/${aggregate.total}；再次点击将从未完成话数继续。`
     }).catch(() => {});
   }
+}
+
+function latestCollectionBatch(records, sourceAid) {
+  const batches = new Map();
+  records.forEach((record, index) => {
+    if (sourceAidFor(record) !== String(sourceAid) || record.supersededByCollection) return;
+    const batchId = String(record.batchId || "");
+    if (!batchId) return;
+    const batch = batches.get(batchId) || { batchId, records: [], lastIndex: index };
+    batch.records.push(record);
+    batch.lastIndex = index;
+    batches.set(batchId, batch);
+  });
+  return [...batches.values()].sort((first, second) => first.lastIndex - second.lastIndex).at(-1) || null;
+}
+
+function collectionBatchNeedsResume(batch, manifest) {
+  if (!batch || !batch.records.some((record) => record.isCollection)) return false;
+  if (batch.records.some((record) => ["starting", "downloading"].includes(record.status))) {
+    return false;
+  }
+  const knownKeys = new Set(batch.records.map((record) => recordKeyFor(record)));
+  const hasNewChapter = manifest.items.some((item) => !knownKeys.has(recordKeyFor(item)));
+  const hasInterruptedChapter = batch.records.some((record) =>
+    ["failed", "paused", "queued"].includes(record.status)
+  );
+  return hasNewChapter || hasInterruptedChapter;
+}
+
+async function resumeCollectionBatch({ manifest, request, comicName, flight, batch }) {
+  const now = new Date().toISOString();
+  const batchId = batch.batchId;
+  flight.batchId = batchId;
+  await mutateAppState((state) => {
+    const existingKeys = new Set(
+      state.quickDownloads
+        .filter((record) => sourceAidFor(record) === String(manifest.sourceAid) &&
+          record.batchId === batchId)
+        .map((record) => recordKeyFor(record))
+    );
+    state.quickDownloads = state.quickDownloads.map((record) => {
+      if (sourceAidFor(record) !== String(manifest.sourceAid) || record.batchId !== batchId) {
+        return record;
+      }
+      const latestItem = manifest.items.find((item) => recordKeyFor(item) === recordKeyFor(record));
+      const refreshed = latestItem ? { ...record, ...latestItem } : record;
+      const shouldQueue = ["failed", "paused", "queued"].includes(record.status);
+      return {
+        ...refreshed,
+        sourceAid: manifest.sourceAid,
+        sourceTitle: request.title,
+        comicName,
+        collectionTotal: manifest.total,
+        downloadMethod: "quick",
+        tabIds: mergeTabIds(record.tabIds, flight.tabIds),
+        ...(shouldQueue ? {
+          status: "queued",
+          downloadId: null,
+          actualFilePath: null,
+          readyAt: 0,
+          startedAt: now,
+          failedAt: null,
+          error: null
+        } : {})
+      };
+    });
+    for (const item of manifest.items) {
+      if (existingKeys.has(recordKeyFor(item))) continue;
+      state.quickDownloads.push({
+        ...item,
+        batchId,
+        aid: item.downloadAid,
+        sourceAid: manifest.sourceAid,
+        sourceTitle: request.title,
+        comicName,
+        collectionTotal: manifest.total,
+        downloadMethod: "quick",
+        status: "queued",
+        tabIds: mergeTabIds(flight.tabIds),
+        startedAt: now,
+        error: null
+      });
+    }
+  });
+  await advanceCollectionBatch(manifest.sourceAid, batchId);
+  return batchId;
 }
 
 async function handleQuickDownload(message, sender) {
@@ -572,6 +658,21 @@ async function startQuickDownload(request, flight) {
     initialState.watches,
     manifest.officialTitle
   );
+  const latestBatch = latestCollectionBatch(initialState.quickDownloads, manifest.sourceAid);
+  if (manifest.isCollection && collectionBatchNeedsResume(latestBatch, manifest)) {
+    await resumeCollectionBatch({ manifest, request, comicName, flight, batch: latestBatch });
+    const resumedState = await loadAppState();
+    const aggregate = aggregateSourceState(
+      recordsForSource(resumedState.quickDownloads, manifest.sourceAid, flight.batchId)
+    );
+    return {
+      ok: aggregate.state !== "error",
+      state: aggregate.state,
+      message: aggregate.state === "error"
+        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}；再次点击将从未完成话数继续。`
+        : `合集将从未完成话数继续（${aggregate.completed}/${aggregate.total}）。`
+    };
+  }
   const now = new Date().toISOString();
   await mutateAppState((state) => {
     // 网页按钮每次点击都是新批次；旧记录仅保留为历史，不参与是否下载的判断。
@@ -606,7 +707,7 @@ async function startQuickDownload(request, flight) {
       ok: aggregate.state !== "error",
       state: aggregate.state,
       message: aggregate.state === "error"
-        ? "合集下载已暂停，再次点击可重新下载全话。"
+        ? "合集下载已暂停，再次点击将从未完成话数继续。"
         : `合集正在逐话下载（共 ${aggregate.total} 个文件）。`
     };
   }
@@ -648,7 +749,7 @@ async function startQuickDownload(request, flight) {
       state: "error",
       downloadId: firstDownloadId,
       message: manifest.isCollection
-        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，再次点击会重新下载全话。`
+        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}；再次点击将从未完成话数继续。`
         : results.find((result) => result?.ok === false)?.message || "下载创建失败。"
     };
   }
@@ -907,7 +1008,7 @@ async function finalizeDownload(downloadId, stateName, errorCode = null) {
       : "下载完成。"
     : aggregate.state === "error"
       ? isCollection
-        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}，再次点击会重新下载全话。`
+        ? `合集下载失败，已完成 ${aggregate.completed}/${aggregate.total}；再次点击将从未完成话数继续。`
         : `下载失败：${finalError || "未知原因"}`
       : `正在下载（${aggregate.completed}/${aggregate.total}）。`;
   const tabIds = mergeTabIds(
