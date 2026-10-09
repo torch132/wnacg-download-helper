@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.11");
+  assert.equal(manifest.version, "1.5.12");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -81,7 +81,7 @@ test("标签系列页跨页导入且最多扫描 15 页", async () => {
   assert.match(app, /async function importCurrentTagPages/);
   assert.match(app, /seenPageSignatures\.has\(signature\)/);
   assert.match(app, /error instanceof WnacgParseError/);
-  assert.match(app, /await importCurrentTagPages\(\[watch\]\)/);
+  assert.match(app, /await importCurrentTagPages\(\[watch\], \{ includeCurrentPage: true \}\)/);
 });
 
 test("侧栏使用全宽全高响应式布局，不依赖新标签页", async () => {
@@ -134,6 +134,17 @@ test("侧栏以本地 ZIP 核对待下载项，原始进度只做显示折叠", 
   assert.match(app, /function visibleUpdates\(\)\s*\{\s*return reconcileEquivalentChapterUpdates\(state\.updates\)/s);
   assert.doesNotMatch(app, /state\.updates\s*=\s*reconcileEquivalentChapterUpdates\(state\.updates\)/);
   assert.doesNotMatch(app, /state\.updates = state\.updates\.filter\(\(item\) => item\.watchId !== id\)/);
+});
+
+test("新增关注导入当前页面，下载选中不重复查重", async () => {
+  const app = await read("app.js");
+  assert.match(app, /importCurrentTagPages\(\[watch\], \{ includeCurrentPage: true \}\)/);
+  const downloadStart = app.indexOf("async function downloadSelected()");
+  const downloadEnd = app.indexOf("\nfunction updateKey", downloadStart);
+  const downloadBody = app.slice(downloadStart, downloadEnd);
+  assert.doesNotMatch(downloadBody, /refreshLocalArchiveIndex\(/,
+    "下载选中不得重新扫描本地漫画库");
+  assert.match(downloadBody, /actionableUpdates\(\)\.filter\(\(record\) => record\.selected\)/);
 });
 
 test("无修正版替换仅由侧栏触发，并在删除失败时显示警告", async () => {

@@ -122,7 +122,7 @@ async function readCurrentPageSnapshot() {
         const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
         return { url: location.href, title, albums: [], detailAid };
       }
-      if (!location.pathname.startsWith("/albums-")) return null;
+      if (location.pathname !== "/" && !location.pathname.startsWith("/albums-")) return null;
       const seenAids = new Set();
       const albums = [];
       for (const item of document.querySelectorAll(".gallary_item")) {
@@ -156,7 +156,11 @@ async function refreshCurrentPageSnapshot() {
   return currentPageSnapshot;
 }
 
-async function importCurrentPageMatches(watches, collectionCache = new Map()) {
+async function importCurrentPageMatches(
+  watches,
+  collectionCache = new Map(),
+  { includeCurrentPage = false } = {}
+) {
   if (!currentPageSnapshot?.albums?.length || watches.length === 0) return [];
   const albums = await expandMatchedCollections(
     currentPageSnapshot.albums,
@@ -165,7 +169,9 @@ async function importCurrentPageMatches(watches, collectionCache = new Map()) {
   );
   const isTagPage = buildTagPageScanPlan(currentPageSnapshot.url, MAX_TAG_SCAN_PAGES).length > 0;
   const result = createUpdateCandidates({
-    albums: isTagPage ? albums : filterAlbumsAfterBaselines(albums, watches, hasLocalReplacement),
+    albums: isTagPage || includeCurrentPage
+      ? albums
+      : filterAlbumsAfterBaselines(albums, watches, hasLocalReplacement),
     watchItems: watches,
     existingRecords: state.updates,
     findLocalArchive: localArchiveFor,
@@ -176,13 +182,16 @@ async function importCurrentPageMatches(watches, collectionCache = new Map()) {
   return result.added;
 }
 
-async function importCurrentTagPages(watches) {
+async function importCurrentTagPages(watches, { includeCurrentPage = false } = {}) {
   const plan = buildTagPageScanPlan(
     currentPageSnapshot?.url,
     MAX_TAG_SCAN_PAGES
   );
   if (plan.length === 0) {
-    return { added: await importCurrentPageMatches(watches), pagesScanned: 0 };
+    return {
+      added: await importCurrentPageMatches(watches, new Map(), { includeCurrentPage }),
+      pagesScanned: 0
+    };
   }
 
   const added = [];
@@ -638,7 +647,7 @@ async function handleWatchSubmit(event) {
       state.watches.push(watch);
       addActivity(state, "info", `已添加关注“${prefix}”。`);
     }
-    const tagImport = await importCurrentTagPages([watch]);
+    const tagImport = await importCurrentTagPages([watch], { includeCurrentPage: true });
     const imported = tagImport.added;
     if (imported.length > 0) {
       addActivity(
@@ -1033,18 +1042,6 @@ async function downloadSelected() {
   if (state.updates.some((record) => record.selected && record.replacement?.source === "library") &&
       !await ensureLibraryWritePermission(libraryHandle, true)) {
     showToast("替换无修正版需要对旧 ZIP 所在漫画库授予写入权限；原文件不会被删除。", "warning");
-    return;
-  }
-  setBusy(true, "正在核对本地文件…");
-  try {
-    if (!await refreshLocalArchiveIndex(true)) {
-      showToast("请先选择并授权本地漫画库，以核对已下载文件。", "warning");
-      setBusy(false);
-      return;
-    }
-  } catch (error) {
-    showToast(`本地漫画库检查失败：${readableError(error)}`, "error");
-    setBusy(false);
     return;
   }
   renderAll();
