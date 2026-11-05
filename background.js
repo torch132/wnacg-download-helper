@@ -104,7 +104,8 @@ async function fetchText(url) {
   try {
     const response = await fetch(url, {
       cache: "no-store",
-      credentials: "omit",
+      // wnACG 会根据当前浏览器会话返回下载页；省略 Cookie 时会伪装成 404。
+      credentials: "include",
       signal: controller.signal
     });
     if (!response.ok) throw new Error(`下载页请求失败（HTTP ${response.status}）。`);

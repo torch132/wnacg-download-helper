@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("manifest 使用 Side Panel 常驻管理界面", async () => {
   const manifest = JSON.parse(await read("manifest.json"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.5.13");
+  assert.equal(manifest.version, "1.5.14");
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, [
     "storage",
@@ -72,6 +72,18 @@ test("侧栏从当前活动 wnACG 列表页提取可见章节", async () => {
   assert.match(app, /parseCollectionChapterPage/);
   assert.match(app, /async function refreshCurrentPageSnapshot\(\)/);
   assert.doesNotMatch(app, /请保持弹窗打开/);
+});
+
+test("下载页请求携带 wnACG 会话凭据，避免伪 404", async () => {
+  const [app, background] = await Promise.all([read("app.js"), read("background.js")]);
+  const appFetchStart = app.indexOf("async function fetchText(url)");
+  const backgroundFetchStart = background.indexOf("async function fetchText(url)");
+  const appFetchText = app.slice(appFetchStart, app.indexOf("async function resolveDownloadItems", appFetchStart));
+  const backgroundFetchText = background.slice(backgroundFetchStart, background.indexOf("function collectionChapterPageUrl", backgroundFetchStart));
+  assert.match(appFetchText, /credentials:\s*"include"/);
+  assert.match(backgroundFetchText, /credentials:\s*"include"/);
+  assert.doesNotMatch(appFetchText, /credentials:\s*"omit"/);
+  assert.doesNotMatch(backgroundFetchText, /credentials:\s*"omit"/);
 });
 
 test("标签系列页跨页导入且最多扫描 15 页", async () => {
