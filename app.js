@@ -1281,9 +1281,17 @@ function renderUpdates() {
     toggle.setAttribute("aria-controls", rowsId);
     const chevron = textElement("span", "›", "update-group-chevron");
     chevron.setAttribute("aria-hidden", "true");
+    const title = textElement("strong", comicName, "update-group-title");
+    if (records.some((record) => [
+      UPDATE_STATUS.PENDING,
+      UPDATE_STATUS.FAILED,
+      UPDATE_STATUS.DOWNLOADING
+    ].includes(record.status))) {
+      title.append(textElement("span", "有更新", "update-group-badge"));
+    }
     toggle.append(
       chevron,
-      textElement("strong", comicName, "update-group-title"),
+      title,
       textElement("span", `${records.length} 项`, "update-group-count")
     );
     heading.append(toggle);

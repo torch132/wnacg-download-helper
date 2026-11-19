@@ -721,6 +721,20 @@ input[type="checkbox"] {
   overflow-wrap: anywhere;
 }
 
+.update-group-badge {
+  display: inline-block;
+  margin-inline-start: 6px;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--success-soft);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.4;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 .update-group-chevron {
   width: 12px;
   flex: 0 0 12px;
